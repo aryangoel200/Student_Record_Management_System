@@ -1,0 +1,31 @@
+# Build output and local caches — never commit these.
+.gradle/
+build/
+app/build/
+captures/
+.cxx/
+*.apk
+*.aab
+*.ap_
+*.dex
+
+# Machine-specific SDK path. Android Studio rewrites it per developer.
+local.properties
+
+# Android Studio / IntelliJ
+.idea/
+*.iml
+.navigation/
+
+# Keystores — signing material must never be committed.
+*.jks
+*.keystore
+
+# macOS
+.DS_Store
+
+# DO commit the Gradle wrapper. It pins the Gradle version so every developer
+# and CI runner builds identically, without installing Gradle first:
+#   gradle/wrapper/gradle-wrapper.jar
+#   gradle/wrapper/gradle-wrapper.properties
+#   gradlew, gradlew.bat
