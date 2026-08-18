@@ -1,107 +1,69 @@
-import http
-from rest_framework.decorators import api_view
+import logging
 
 from rest_framework import status
-from rest_framework.views import APIView
-
+from rest_framework.decorators import api_view, permission_classes, throttle_classes
+from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
+from rest_framework.throttling import ScopedRateThrottle
 
-from Face_Recognation.serializer import Register_Image_Serializer
-import face_recognition, os, base64,io
-import numpy as np
-from PIL import Image
+from .http import face_error_response
+from .models import FaceEnrollment
+from .serializers import FaceEnrollmentSerializer, FaceImageSerializer
+from .services import FaceRecognitionError, decode_image, get_face_backend
 
-
-@api_view(['POST'])
-def Register_Image(request):
-    serializer = Register_Image_Serializer(data=request.data)
-
-    if serializer.is_valid(raise_exception=True):
-        _, image_data = request.data['image'].split(',')
-        image_filename = f"{request.data['student_Id']}.png"  # You can set your desired filename
-        image_path = os.path.join("/Users/aryangoel/Desktop/Student-Record-Management-System-main 2/Backend/Face_Recognation/media_image",
-                                  image_filename)
-
-        print(image_path)
-        # Decode and save the image
-        with open(image_path, "wb") as f:
-            f.write(base64.b64decode(image_data))
-
-        # Load the image using face_recognition library
-        image = face_recognition.load_image_file(image_path)
-
-        face_locations = face_recognition.face_locations(image)
-        print(face_locations)
-
-        print(face_locations)
-        if len(face_locations) != 1:
-            # Handle the case when no face or multiple faces are detected
-            return Response({"error": "Invalid number of faces detected."}, status=status.HTTP_400_BAD_REQUEST)
-
-        face_encoding = face_recognition.face_encodings(image, face_locations)[0]
-        print(face_encoding)
-        save_folder = "./encoding_folder"
-        if not os.path.exists(save_folder):
-            os.makedirs(save_folder)
-
-        encoding_filename = f"{request.data['student_Id']}.npy"
-        encoding_path = os.path.join(save_folder, encoding_filename)
-
-        # Save the facial encoding to a file using numpy
-        np.save(encoding_path, face_encoding)
-
-        serializer.save()
-        return Response({"success"}, status=status.HTTP_201_CREATED)
+logger = logging.getLogger(__name__)
 
 
-    return Response(serializer.data, status=status.HTTP_401_UNAUTHORIZED)
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+@throttle_classes([ScopedRateThrottle])
+def register_image(request):
+    """Enrol (or re-enrol) the *calling user's* reference face.
+
+    The subject is always request.user. The old endpoint took a student_Id from
+    the request body, so anyone could overwrite anyone else's reference face.
+    """
+    serializer = FaceImageSerializer(data=request.data)
+    serializer.is_valid(raise_exception=True)
+
+    backend = get_face_backend()
+    try:
+        image = decode_image(serializer.validated_data["image"])
+        embedding = backend.embed(image)
+    except FaceRecognitionError as exc:
+        return face_error_response(exc)
+
+    enrollment, created = FaceEnrollment.objects.update_or_create(
+        user=request.user,
+        defaults={"embedding": embedding, "model_name": backend.name},
+    )
+    logger.info(
+        "Face %s for %s", "enrolled" if created else "re-enrolled", request.user.username
+    )
+    return Response(
+        FaceEnrollmentSerializer(enrollment).data,
+        status=status.HTTP_201_CREATED if created else status.HTTP_200_OK,
+    )
 
 
-
-@api_view(['POST'])
-def image_verification(request):
-
-    # Loading the verification image encoding from the .npy file
-    verification_images_save_folder = "./encoding_folder"
-    verification_img_encoding_filename = f"{request.data['student_Id']}.npy"
-    verification_img_encoding_path = os.path.join(verification_images_save_folder, verification_img_encoding_filename)
-
-    if os.path.exists(verification_img_encoding_path):
-        verification_img_encoding = np.load(verification_img_encoding_path)
-        
-        print("Shape of loaded image encoding:", verification_img_encoding.shape)
-        
-    else:
-        print("File not found:", verification_img_encoding_path)
+register_image.throttle_scope = "face"
 
 
-    #generating the captured image encoding 
-    _, captured_image_data = request.data['image'].split(',')
+@api_view(["GET", "DELETE"])
+@permission_classes([IsAuthenticated])
+def my_enrollment(request):
+    """Inspect or withdraw your own face enrolment."""
+    try:
+        enrollment = request.user.face_enrollment
+    except FaceEnrollment.DoesNotExist:
+        if request.method == "DELETE":
+            return Response(status=status.HTTP_204_NO_CONTENT)
+        return Response(
+            {"detail": "You have not enrolled a face yet."},
+            status=status.HTTP_404_NOT_FOUND,
+        )
 
-    captured_decoded_image = base64.b64decode(captured_image_data)
-
-    captured_image = Image.open(io.BytesIO(captured_decoded_image))
-    captured_image = captured_image.convert("RGB")
-    captured_face_locations = face_recognition.face_locations(np.array(captured_image))
-
-    if len(captured_face_locations) != 1:
-        return Response({"message": "Multiple Face detected."},
-                        status=status.HTTP_200_OK)
-    else:
-        captured_img_encoding = face_recognition.face_encodings(np.array(captured_image), captured_face_locations)[0]
-
-
-    #comparing the encodings
-        
-    # Compare the face encodings
-    results = face_recognition.compare_faces([verification_img_encoding], captured_img_encoding)
-
-    # Check the results
-    if results[0]:
-        print("There is a match")
-        return Response({"message":"success"},
-                        status=status.HTTP_200_OK)
-    else:
-         print("This was not a match")
-         return Response({"message":"failure"},
-                        status=status.HTTP_200_OK)       
+    if request.method == "DELETE":
+        enrollment.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+    return Response(FaceEnrollmentSerializer(enrollment).data)
