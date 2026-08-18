@@ -1252,6 +1252,14 @@ class TodayFeedTests(BaseAPITestCase):
         self.assertEqual(response.data["sessions"][0]["presence"], "present")
 
     @freeze_now()
+    def test_teacher_has_no_presence_of_their_own(self):
+        """A teacher is not a student; their own class must not read "absent"."""
+        self.make_session()
+        self.as_(self.teacher)
+        response = self.client.post("/api/Home/today", {}, format="json")
+        self.assertIsNone(response.data["sessions"][0]["presence"])
+
+    @freeze_now()
     def test_teacher_sees_a_live_present_count(self):
         session = self.make_session()
         AttendanceRecord.objects.create(session=session, student=self.student)

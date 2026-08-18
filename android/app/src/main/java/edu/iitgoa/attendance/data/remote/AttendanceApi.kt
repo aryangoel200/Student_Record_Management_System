@@ -52,10 +52,18 @@ interface AttendanceApi {
     @POST("Home/course_stats")
     suspend fun courseStats(@Body body: CourseNameRequest): CourseStatsDto
 
+    @POST("Home/course_student_stats")
+    suspend fun courseStudentStats(
+        @Body body: CourseNameRequest,
+    ): CourseStudentStatsDto
+
+    @POST("Home/archive_course")
+    suspend fun archiveCourse(@Body body: ArchiveCourseRequest): Response<Unit>
+
     // --- Sessions ---
 
     @POST("Home/create")
-    suspend fun createSession(@Body body: CreateSessionRequest): SessionDto
+    suspend fun createSession(@Body body: CreateSessionRequest): CreatedSessionsDto
 
     @POST("Home/show_sessions")
     suspend fun sessions(@Body body: CourseNameRequest): List<SessionDto>
@@ -65,6 +73,13 @@ interface AttendanceApi {
 
     @POST("Home/delete_session")
     suspend fun deleteSession(@Body body: SessionSlotRequest): Response<Unit>
+
+    @POST("Home/delete_session_series")
+    suspend fun deleteSessionSeries(@Body body: SeriesRequest): Response<Unit>
+
+    /** Every session today, across every course the caller is part of. */
+    @POST("Home/today")
+    suspend fun today(@Body body: Map<String, String> = emptyMap()): TodayFeedDto
 
     @POST("Home/show_students_in_session")
     suspend fun studentsInSession(@Body body: SessionSlotRequest): List<AttendanceRecordDto>

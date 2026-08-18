@@ -2,6 +2,7 @@ package edu.iitgoa.attendance.ui.teacher
 
 import android.Manifest
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -29,6 +30,9 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.AssistChip
+import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
@@ -51,9 +55,12 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import edu.iitgoa.attendance.data.remote.SessionDto
+import edu.iitgoa.attendance.data.remote.StudentAttendanceDto
 import edu.iitgoa.attendance.ui.common.EmptyState
 import edu.iitgoa.attendance.ui.common.ErrorBanner
 import edu.iitgoa.attendance.ui.common.LoadingBox
+import edu.iitgoa.attendance.ui.common.SessionCard
+import edu.iitgoa.attendance.ui.theme.statusColors
 import edu.iitgoa.attendance.ui.common.PermissionGate
 import edu.iitgoa.attendance.ui.formatDate
 import edu.iitgoa.attendance.ui.formatSlot
@@ -62,7 +69,7 @@ import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneId
 
-private val TABS = listOf("Sessions", "Students", "Stats")
+private val TABS = listOf("Sessions", "Students", "Overview")
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -70,7 +77,10 @@ fun TeacherCourseScreen(
     courseName: String,
     state: TeacherCourseState,
     onOpenSession: (SessionDto) -> Unit,
-    onCreateSession: (date: String, start: String, end: String, radius: Double) -> Unit,
+    onCreateSession: (
+        date: String, start: String, end: String, radius: Double,
+        repeat: String, interval: Int, count: Int?,
+    ) -> Unit,
     onDeleteSession: (SessionDto) -> Unit,
     onBack: () -> Unit,
     onMessagesShown: () -> Unit,
@@ -137,7 +147,7 @@ fun TeacherCourseScreen(
                     onOpen = onOpenSession,
                     onDelete = { pendingDelete = it },
                 )
-                1 -> StudentsTab(state)
+                1 -> StudentDashboardTab(state)
                 else -> StatsTab(state)
             }
         }
@@ -147,9 +157,9 @@ fun TeacherCourseScreen(
         CreateSessionSheet(
             isSubmitting = state.isCreatingSession,
             onDismiss = { showCreate = false },
-            onConfirm = { date, start, end, radius ->
+            onConfirm = { date, start, end, radius, repeat, interval, count ->
                 showCreate = false
-                onCreateSession(date, start, end, radius)
+                onCreateSession(date, start, end, radius, repeat, interval, count)
             },
         )
     }
@@ -196,30 +206,20 @@ private fun SessionsTab(
 
     LazyColumn(
         contentPadding = PaddingValues(16.dp),
-        verticalArrangement = Arrangement.spacedBy(8.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
-        items(sessions, key = { it.id }) { session ->
-            Card(onClick = { onOpen(session) }, modifier = Modifier.fillMaxWidth()) {
-                Row(
-                    Modifier.padding(16.dp).fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Column(Modifier.weight(1f)) {
-                        Text(
-                            formatDate(session.date),
-                            style = MaterialTheme.typography.titleSmall,
-                        )
-                        Text(
-                            formatSlot(session.startTime, session.endTime),
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                        Text(
-                            "${session.radiusM.toInt()} m radius",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
+        // Live first, so the class in progress is never buried under history.
+        val ordered = sessions.sortedWith(
+            compareByDescending<SessionDto> { it.isOpen }
+                .thenByDescending { it.date }
+                .thenByDescending { it.startTime }
+        )
+        items(ordered, key = { it.id }) { session ->
+            SessionCard(
+                session = session,
+                showDate = true,
+                onClick = { onOpen(session) },
+                trailing = {
                     IconButton(onClick = { onDelete(session) }) {
                         Icon(
                             Icons.Default.Delete,
@@ -227,15 +227,15 @@ private fun SessionsTab(
                             tint = MaterialTheme.colorScheme.error,
                         )
                     }
-                }
-            }
+                },
+            )
         }
     }
 }
 
 @Composable
-private fun StudentsTab(state: TeacherCourseState) {
-    if (state.roster.isEmpty()) {
+private fun StudentDashboardTab(state: TeacherCourseState) {
+    if (state.studentStats.isEmpty()) {
         EmptyState(
             icon = Icons.Default.Groups,
             title = "Nobody enrolled yet",
@@ -248,13 +248,84 @@ private fun StudentsTab(state: TeacherCourseState) {
         contentPadding = PaddingValues(16.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        items(state.roster, key = { it.username }) { student ->
-            Card(Modifier.fillMaxWidth()) {
-                Column(Modifier.padding(16.dp)) {
-                    Text(student.name, style = MaterialTheme.typography.bodyLarge)
+        item {
+            Text(
+                "Lowest attendance first",
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        items(state.studentStats, key = { it.username }) { row ->
+            StudentStatRow(row)
+        }
+    }
+}
+
+@Composable
+private fun StudentStatRow(row: StudentAttendanceDto) {
+    // Traffic-light banding so a teacher can scan the list rather than read it.
+    val tint = when {
+        row.attendancePct >= 75 -> statusColors.present
+        row.attendancePct >= 50 -> MaterialTheme.colorScheme.tertiary
+        else -> MaterialTheme.colorScheme.error
+    }
+
+    Card(Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(16.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text(row.name, style = MaterialTheme.typography.bodyLarge)
                     Text(
-                        student.username,
+                        row.username,
                         style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Column(horizontalAlignment = Alignment.End) {
+                    Text(
+                        "${row.attendancePct}%",
+                        style = MaterialTheme.typography.titleMedium,
+                        color = tint,
+                    )
+                    Text(
+                        "${row.attended}/${row.totalSessions}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+
+            Spacer(Modifier.height(8.dp))
+            LinearProgressIndicator(
+                progress = { (row.attendancePct / 100.0).toFloat() },
+                color = tint,
+                modifier = Modifier.fillMaxWidth(),
+            )
+
+            Spacer(Modifier.height(8.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                // A student with no enrolled face cannot mark attendance at
+                // all, which explains a low percentage that is not truancy.
+                if (!row.faceEnrolled) {
+                    AssistChip(
+                        onClick = {},
+                        enabled = false,
+                        label = { Text("No face enrolled") },
+                    )
+                    Spacer(Modifier.width(8.dp))
+                }
+                if (row.manualCount > 0) {
+                    AssistChip(
+                        onClick = {},
+                        enabled = false,
+                        label = { Text("${row.manualCount} manual") },
+                    )
+                    Spacer(Modifier.width(8.dp))
+                }
+                row.lastSeen?.let {
+                    Text(
+                        "last seen ${formatDate(it)}",
+                        style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
@@ -298,12 +369,18 @@ private fun StatRow(label: String, value: String) {
 private fun CreateSessionSheet(
     isSubmitting: Boolean,
     onDismiss: () -> Unit,
-    onConfirm: (date: String, start: String, end: String, radius: Double) -> Unit,
+    onConfirm: (
+        date: String, start: String, end: String, radius: Double,
+        repeat: String, interval: Int, count: Int?,
+    ) -> Unit,
 ) {
     var stage by remember { mutableIntStateOf(0) }
     var date by remember { mutableStateOf(LocalDate.now()) }
     var startTime by remember { mutableStateOf("") }
     var radius by remember { mutableStateOf("100") }
+    var repeat by remember { mutableStateOf(RepeatOption.NONE) }
+    var interval by remember { mutableStateOf("1") }
+    var occurrences by remember { mutableStateOf("12") }
 
     val datePickerState = rememberDatePickerState(
         initialSelectedDateMillis = System.currentTimeMillis(),
@@ -344,9 +421,65 @@ private fun CreateSessionSheet(
             onDismissRequest = onDismiss,
             title = { Text("End time") },
             text = { TimePicker(state = endState) },
-            confirmButton = {
-                TextButton(onClick = { stage = 3 }) { Text("Next") }
+            confirmButton = { TextButton(onClick = { stage = 3 }) { Text("Next") } },
+            dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+        )
+
+        3 -> AlertDialog(
+            onDismissRequest = onDismiss,
+            title = { Text("Repeat") },
+            text = {
+                Column {
+                    RepeatOption.entries.forEach { option ->
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .selectable(
+                                    selected = repeat == option,
+                                    onClick = { repeat = option },
+                                )
+                                .padding(vertical = 6.dp),
+                        ) {
+                            RadioButton(
+                                selected = repeat == option,
+                                onClick = { repeat = option },
+                            )
+                            Spacer(Modifier.width(8.dp))
+                            Text(option.label)
+                        }
+                    }
+
+                    if (repeat != RepeatOption.NONE) {
+                        Spacer(Modifier.height(12.dp))
+                        Row {
+                            OutlinedTextField(
+                                value = interval,
+                                onValueChange = { interval = it.filter(Char::isDigit) },
+                                label = { Text("Every") },
+                                suffix = { Text(repeat.unit) },
+                                singleLine = true,
+                                modifier = Modifier.weight(1f),
+                            )
+                            Spacer(Modifier.width(8.dp))
+                            OutlinedTextField(
+                                value = occurrences,
+                                onValueChange = { occurrences = it.filter(Char::isDigit) },
+                                label = { Text("Times") },
+                                singleLine = true,
+                                modifier = Modifier.weight(1f),
+                            )
+                        }
+                        Spacer(Modifier.height(8.dp))
+                        Text(
+                            repeat.explain(interval, occurrences, date),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
             },
+            confirmButton = { TextButton(onClick = { stage = 4 }) { Text("Next") } },
             dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
         )
 
@@ -355,8 +488,8 @@ private fun CreateSessionSheet(
             title = { Text("Geofence") },
             text = {
                 Column {
-                    // The permission is requested here rather than up front,
-                    // because this is the moment the position is actually taken.
+                    // Asked for here rather than up front, because this is the
+                    // moment the position is actually taken.
                     PermissionGate(
                         permissions = listOf(Manifest.permission.ACCESS_FINE_LOCATION),
                         rationaleTitle = "Location needed",
@@ -390,11 +523,40 @@ private fun CreateSessionSheet(
                             startTime,
                             wireTime(endState.hour, endState.minute),
                             radius.toDoubleOrNull() ?: 100.0,
+                            repeat.wire,
+                            interval.toIntOrNull()?.coerceAtLeast(1) ?: 1,
+                            if (repeat == RepeatOption.NONE) null
+                            else occurrences.toIntOrNull()?.coerceIn(1, 60) ?: 1,
                         )
                     },
-                ) { Text("Start session") }
+                ) { Text(if (repeat == RepeatOption.NONE) "Start session" else "Schedule") }
             },
             dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
         )
+    }
+}
+
+/** Mirrors `Home.models.Repeat` on the server. */
+private enum class RepeatOption(
+    val wire: String,
+    val label: String,
+    val unit: String,
+) {
+    NONE("none", "Does not repeat", ""),
+    DAILY("daily", "Daily", "days"),
+    WEEKLY("weekly", "Weekly", "weeks"),
+    MONTHLY("monthly", "Monthly", "months");
+
+    /** Plain-English preview, so nobody has to guess what they just set up. */
+    fun explain(interval: String, count: String, from: LocalDate): String {
+        val n = interval.toIntOrNull()?.coerceAtLeast(1) ?: 1
+        val times = count.toIntOrNull()?.coerceAtLeast(1) ?: 1
+        val every = if (n == 1) "every $unit".dropLast(1) else "every $n $unit"
+        val base = "Creates $times sessions, $every, starting ${from}."
+        return if (this == MONTHLY) {
+            "$base Months without a ${from.dayOfMonth}th are skipped."
+        } else {
+            base
+        }
     }
 }

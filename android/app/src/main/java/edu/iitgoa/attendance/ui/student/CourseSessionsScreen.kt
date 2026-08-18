@@ -37,6 +37,7 @@ import edu.iitgoa.attendance.data.remote.SessionDto
 import edu.iitgoa.attendance.ui.common.EmptyState
 import edu.iitgoa.attendance.ui.common.ErrorBanner
 import edu.iitgoa.attendance.ui.common.LoadingBox
+import edu.iitgoa.attendance.ui.common.SessionCard
 import edu.iitgoa.attendance.ui.formatDate
 import edu.iitgoa.attendance.ui.formatSlot
 
@@ -149,67 +150,16 @@ private fun ActiveSessionCard(
     canMark: Boolean,
     onMark: () -> Unit,
 ) {
-    Card(
-        Modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.primaryContainer,
-        ),
-    ) {
-        Column(Modifier.padding(16.dp)) {
-            Text(
-                formatSlot(session.startTime, session.endTime),
-                style = MaterialTheme.typography.titleMedium,
-                color = MaterialTheme.colorScheme.onPrimaryContainer,
-            )
-            Spacer(Modifier.height(4.dp))
-            Text(
-                "You must be within ${session.radiusM.toInt()} m of the classroom.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onPrimaryContainer,
-            )
-            Spacer(Modifier.height(12.dp))
-            Button(onClick = onMark, enabled = canMark, modifier = Modifier.fillMaxWidth()) {
-                Text(if (canMark) "Mark attendance" else "Set up face verification first")
-            }
+    Column {
+        SessionCard(session = session, onClick = if (canMark) onMark else null)
+        Spacer(Modifier.height(8.dp))
+        Button(onClick = onMark, enabled = canMark, modifier = Modifier.fillMaxWidth()) {
+            Text(if (canMark) "Mark attendance" else "Set up face verification first")
         }
     }
 }
 
 @Composable
 private fun SessionRow(session: SessionDto) {
-    Card(Modifier.fillMaxWidth()) {
-        Row(
-            Modifier.padding(16.dp).fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            val present = session.isPresent
-            Icon(
-                if (present) Icons.Default.CheckCircle else Icons.Default.RadioButtonUnchecked,
-                contentDescription = if (present) "Present" else "Absent",
-                tint = if (present) {
-                    Color(0xFF2E7D32)
-                } else {
-                    MaterialTheme.colorScheme.outline
-                },
-            )
-            Spacer(Modifier.width(16.dp))
-            Column(Modifier.weight(1f)) {
-                Text(formatDate(session.date), style = MaterialTheme.typography.bodyLarge)
-                Text(
-                    formatSlot(session.startTime, session.endTime),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-            Text(
-                if (present) "Present" else "Absent",
-                style = MaterialTheme.typography.labelMedium,
-                color = if (present) {
-                    Color(0xFF2E7D32)
-                } else {
-                    MaterialTheme.colorScheme.onSurfaceVariant
-                },
-            )
-        }
-    }
+    SessionCard(session = session, showDate = true)
 }

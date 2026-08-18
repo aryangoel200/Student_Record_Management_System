@@ -56,6 +56,7 @@ data class CourseDto(
     val teacher: String,
     @SerialName("teacher_name") val teacherName: String = "",
     @SerialName("enrolled_count") val enrolledCount: Int? = null,
+    @SerialName("is_archived") val isArchived: Boolean = false,
 )
 
 @Serializable
@@ -86,9 +87,62 @@ data class SessionDto(
     @SerialName("radius_m") val radiusM: Double,
     // Null when the caller is not a student of the course.
     val presence: String? = null,
+    // Decided by the server, never by this device's clock — a drifting or
+    // differently-zoned clock would disagree with the geofence check.
+    @SerialName("is_open") val isOpen: Boolean = false,
+    // Only populated for teachers.
+    @SerialName("present_count") val presentCount: Int? = null,
+    val repeat: String = "none",
+    @SerialName("series_id") val seriesId: String? = null,
 ) {
     val isPresent: Boolean get() = presence == "present"
+    val repeatsRegularly: Boolean get() = repeat != "none"
 }
+
+@Serializable
+data class TodayFeedDto(
+    val date: String,
+    val now: String,
+    @SerialName("open_count") val openCount: Int,
+    val sessions: List<SessionDto>,
+)
+
+@Serializable
+data class StudentAttendanceDto(
+    val username: String,
+    val name: String,
+    val email: String = "",
+    val attended: Int,
+    @SerialName("total_sessions") val totalSessions: Int,
+    @SerialName("attendance_pct") val attendancePct: Double,
+    @SerialName("manual_count") val manualCount: Int,
+    @SerialName("last_seen") val lastSeen: String? = null,
+    @SerialName("face_enrolled") val faceEnrolled: Boolean = false,
+)
+
+@Serializable
+data class CourseStudentStatsDto(
+    @SerialName("course_name") val courseName: String,
+    @SerialName("total_sessions") val totalSessions: Int,
+    val students: List<StudentAttendanceDto>,
+)
+
+@Serializable
+data class ArchiveCourseRequest(
+    @SerialName("course_name") val courseName: String,
+    val archived: Boolean,
+)
+
+@Serializable
+data class SeriesRequest(@SerialName("series_id") val seriesId: String)
+
+@Serializable
+data class CreatedSessionsDto(
+    val created: List<SessionDto> = emptyList(),
+    val skipped: List<String> = emptyList(),
+    @SerialName("series_id") val seriesId: String? = null,
+    val detail: String? = null,
+)
 
 @Serializable
 data class SessionSlotRequest(
@@ -107,6 +161,9 @@ data class CreateSessionRequest(
     val lat: Double,
     val lon: Double,
     @SerialName("radius_m") val radiusM: Double? = null,
+    val repeat: String = "none",
+    @SerialName("repeat_interval") val repeatInterval: Int = 1,
+    @SerialName("repeat_count") val repeatCount: Int? = null,
 )
 
 // --- Attendance ------------------------------------------------------------

@@ -719,15 +719,18 @@ def today(request):
         .order_by("start_time", "end_time")
     )
 
-    present_ids = set(
-        AttendanceRecord.objects.filter(
-            student=user, session__in=sessions
-        ).values_list("session_id", flat=True)
-    )
+    # Only a student has attendance of their own. Passing an empty set for a
+    # teacher would render every one of their own classes as "absent".
+    is_staff = user.is_teacher or user.is_admin
+    context = {}
+    if not is_staff:
+        context["present_session_ids"] = set(
+            AttendanceRecord.objects.filter(
+                student=user, session__in=sessions
+            ).values_list("session_id", flat=True)
+        )
 
-    serialized = SessionSerializer(
-        sessions, many=True, context={"present_session_ids": present_ids}
-    ).data
+    serialized = SessionSerializer(sessions, many=True, context=context).data
 
     # Live first, then upcoming, then finished — each group already in time
     # order from the query above.

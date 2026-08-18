@@ -8,6 +8,7 @@ import edu.iitgoa.attendance.data.ApiResult
 import edu.iitgoa.attendance.data.remote.AttendanceRecordDto
 import edu.iitgoa.attendance.data.remote.CourseDto
 import edu.iitgoa.attendance.data.remote.CourseStatsDto
+import edu.iitgoa.attendance.data.remote.StudentAttendanceDto
 import edu.iitgoa.attendance.data.remote.SessionDto
 import edu.iitgoa.attendance.data.remote.StudentDto
 import edu.iitgoa.attendance.data.repo.AttendanceRepository
@@ -25,6 +26,7 @@ data class TeacherHomeState(
     val courses: List<CourseDto> = emptyList(),
     val error: String? = null,
     val message: String? = null,
+    val showArchived: Boolean = false,
 )
 
 class TeacherHomeViewModel(private val courses: CourseRepository) : ViewModel() {
@@ -39,9 +41,30 @@ class TeacherHomeViewModel(private val courses: CourseRepository) : ViewModel() 
     fun refresh() {
         viewModelScope.launch {
             _state.value = _state.value.copy(isLoading = true, error = null)
-            _state.value = when (val result = courses.createdCourses()) {
+            val result = courses.createdCourses(_state.value.showArchived)
+            _state.value = when (result) {
                 is ApiResult.Ok -> _state.value.copy(isLoading = false, courses = result.value)
                 is ApiResult.Err -> _state.value.copy(isLoading = false, error = result.message)
+            }
+        }
+    }
+
+    fun toggleShowArchived() {
+        _state.value = _state.value.copy(showArchived = !_state.value.showArchived)
+        refresh()
+    }
+
+    /** Archiving hides a course without destroying its attendance history. */
+    fun setArchived(courseName: String, archived: Boolean) {
+        viewModelScope.launch {
+            when (val result = courses.setArchived(courseName, archived)) {
+                is ApiResult.Ok -> {
+                    _state.value = _state.value.copy(
+                        message = if (archived) "$courseName archived." else "$courseName restored.",
+                    )
+                    refresh()
+                }
+                is ApiResult.Err -> _state.value = _state.value.copy(error = result.message)
             }
         }
     }
@@ -92,6 +115,7 @@ data class TeacherCourseState(
     val error: String? = null,
     val message: String? = null,
     val isCreatingSession: Boolean = false,
+    val studentStats: List<StudentAttendanceDto> = emptyList(),
 )
 
 class TeacherCourseViewModel(
@@ -114,8 +138,9 @@ class TeacherCourseViewModel(
             val sessions = courses.sessions(courseName)
             val roster = courses.roster(courseName)
             val stats = courses.stats(courseName)
+            val perStudent = courses.studentStats(courseName)
 
-            val firstError = listOf(sessions, roster, stats)
+            val firstError = listOf(sessions, roster, stats, perStudent)
                 .filterIsInstance<ApiResult.Err>()
                 .firstOrNull()
 
@@ -124,6 +149,7 @@ class TeacherCourseViewModel(
                 sessions = (sessions as? ApiResult.Ok)?.value ?: emptyList(),
                 roster = (roster as? ApiResult.Ok)?.value ?: emptyList(),
                 stats = (stats as? ApiResult.Ok)?.value,
+                studentStats = (perStudent as? ApiResult.Ok)?.value?.students ?: emptyList(),
                 error = firstError?.message,
             )
         }
@@ -136,7 +162,15 @@ class TeacherCourseViewModel(
      * which is why the flow asks for location rather than letting anyone type
      * coordinates.
      */
-    fun createSession(date: String, startTime: String, endTime: String, radiusM: Double) {
+    fun createSession(
+        date: String,
+        startTime: String,
+        endTime: String,
+        radiusM: Double,
+        repeat: String = "none",
+        repeatInterval: Int = 1,
+        repeatCount: Int? = null,
+    ) {
         viewModelScope.launch {
             _state.value = _state.value.copy(isCreatingSession = true, error = null)
 
@@ -159,12 +193,18 @@ class TeacherCourseViewModel(
                     lat = fix.latitude,
                     lon = fix.longitude,
                     radiusM = radiusM,
+                    repeat = repeat,
+                    repeatInterval = repeatInterval,
+                    repeatCount = repeatCount,
                 )
             ) {
                 is ApiResult.Ok -> {
+                    val made = result.value.created.size
                     _state.value = _state.value.copy(
                         isCreatingSession = false,
-                        message = "Session created.",
+                        message = result.value.detail
+                            ?: if (made == 1) "Session created."
+                            else "Created $made sessions.",
                     )
                     refresh()
                 }

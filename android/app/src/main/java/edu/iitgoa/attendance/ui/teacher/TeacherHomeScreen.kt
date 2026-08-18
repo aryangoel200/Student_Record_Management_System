@@ -16,7 +16,9 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Logout
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Archive
 import androidx.compose.material.icons.filled.ContentCopy
+import androidx.compose.material.icons.filled.Unarchive
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.automirrored.filled.LibraryBooks
 import androidx.compose.material3.AlertDialog
@@ -62,6 +64,8 @@ fun TeacherHomeScreen(
     onOpenCourse: (String) -> Unit,
     onCreateCourse: (String) -> Unit,
     onDeleteCourse: (String) -> Unit,
+    onSetArchived: (String, Boolean) -> Unit,
+    onToggleShowArchived: () -> Unit,
     onLogout: () -> Unit,
     onMessagesShown: () -> Unit,
     modifier: Modifier = Modifier,
@@ -84,6 +88,17 @@ fun TeacherHomeScreen(
             TopAppBar(
                 title = { Text("My courses") },
                 actions = {
+                    IconButton(onClick = onToggleShowArchived) {
+                        Icon(
+                            if (state.showArchived) Icons.Default.Unarchive
+                            else Icons.Default.Archive,
+                            contentDescription = if (state.showArchived) {
+                                "Hide archived courses"
+                            } else {
+                                "Show archived courses"
+                            },
+                        )
+                    }
                     IconButton(onClick = onLogout) {
                         Icon(Icons.AutoMirrored.Filled.Logout, contentDescription = "Sign out")
                     }
@@ -129,6 +144,7 @@ fun TeacherHomeScreen(
                         course = course,
                         onClick = { onOpenCourse(course.name) },
                         onDelete = { pendingDelete = course },
+                        onSetArchived = { onSetArchived(course.name, it) },
                     )
                 }
             }
@@ -174,6 +190,7 @@ private fun TeacherCourseRow(
     course: CourseDto,
     onClick: () -> Unit,
     onDelete: () -> Unit,
+    onSetArchived: (Boolean) -> Unit,
 ) {
     val clipboard = LocalClipboard.current
     val scope = rememberCoroutineScope()
@@ -182,7 +199,17 @@ private fun TeacherCourseRow(
         Column(Modifier.padding(16.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
-                    Text(course.name, style = MaterialTheme.typography.titleMedium)
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(course.name, style = MaterialTheme.typography.titleMedium)
+                        if (course.isArchived) {
+                            Spacer(Modifier.width(8.dp))
+                            AssistChip(
+                                onClick = {},
+                                enabled = false,
+                                label = { Text("Archived") },
+                            )
+                        }
+                    }
                     course.enrolledCount?.let {
                         Text(
                             "$it enrolled",
@@ -190,6 +217,19 @@ private fun TeacherCourseRow(
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                     }
+                }
+                // Archive is offered before delete on purpose: it hides the
+                // course without destroying attendance anyone may later need.
+                IconButton(onClick = { onSetArchived(!course.isArchived) }) {
+                    Icon(
+                        if (course.isArchived) Icons.Default.Unarchive
+                        else Icons.Default.Archive,
+                        contentDescription = if (course.isArchived) {
+                            "Restore course"
+                        } else {
+                            "Archive course"
+                        },
+                    )
                 }
                 IconButton(onClick = onDelete) {
                     Icon(

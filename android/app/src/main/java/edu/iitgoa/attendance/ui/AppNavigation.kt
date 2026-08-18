@@ -1,6 +1,15 @@
 package edu.iitgoa.attendance.ui
 
 import android.net.Uri
+import androidx.compose.foundation.layout.padding
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.School
+import androidx.compose.material.icons.filled.Today
+import androidx.compose.material3.Icon
+import androidx.compose.material3.NavigationBar
+import androidx.compose.material3.NavigationBarItem
+import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
@@ -9,6 +18,8 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.NavHostController
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
+import androidx.navigation.NavGraph.Companion.findStartDestination
+import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import edu.iitgoa.attendance.data.AuthState
 import edu.iitgoa.attendance.data.CurrentUser
@@ -32,8 +43,11 @@ import edu.iitgoa.attendance.ui.teacher.TeacherCourseScreen
 import edu.iitgoa.attendance.ui.teacher.TeacherCourseViewModel
 import edu.iitgoa.attendance.ui.teacher.TeacherHomeScreen
 import edu.iitgoa.attendance.ui.teacher.TeacherHomeViewModel
+import edu.iitgoa.attendance.ui.today.TodayScreen
+import edu.iitgoa.attendance.ui.today.TodayViewModel
 
 private object Route {
+    const val TODAY = "today"
     const val LOGIN = "login"
     const val SIGNUP = "signup"
 
@@ -47,6 +61,8 @@ private object Route {
     const val SESSION = "session/{course}/{date}/{start}/{end}"
 
     fun studentCourse(course: String) = "studentCourse/${course.enc()}"
+    fun courseHomeFor(user: CurrentUser) =
+        if (user.canManageCourses) TEACHER_HOME else STUDENT_HOME
     fun teacherCourse(course: String) = "teacherCourse/${course.enc()}"
     fun mark(slot: SessionSlot) = "mark/${slot.path()}"
     fun session(slot: SessionSlot) = "session/${slot.path()}"
@@ -126,11 +142,74 @@ private fun SignedInNavHost(
     modifier: Modifier = Modifier,
 ) {
     val nav = rememberNavController()
-    val start = if (user.canManageCourses) Route.TEACHER_HOME else Route.STUDENT_HOME
+    val coursesRoute = Route.courseHomeFor(user)
 
-    NavHost(nav, startDestination = start, modifier = modifier) {
-        studentGraph(nav, user, onLogout, onProfileChanged)
-        teacherGraph(nav, user, onLogout)
+    // Only the two top-level destinations get a bottom bar. Detail screens are
+    // pushed on top of it, so the bar does not follow you into a camera view.
+    val topLevel = setOf(Route.TODAY, coursesRoute)
+    val backStack by nav.currentBackStackEntryAsState()
+    val currentRoute = backStack?.destination?.route
+
+    Scaffold(
+        modifier = modifier,
+        bottomBar = {
+            if (currentRoute in topLevel) {
+                NavigationBar {
+                    NavigationBarItem(
+                        selected = currentRoute == Route.TODAY,
+                        onClick = { nav.switchTopLevel(Route.TODAY) },
+                        icon = { Icon(Icons.Default.Today, contentDescription = null) },
+                        label = { Text("Today") },
+                    )
+                    NavigationBarItem(
+                        selected = currentRoute == coursesRoute,
+                        onClick = { nav.switchTopLevel(coursesRoute) },
+                        icon = { Icon(Icons.Default.School, contentDescription = null) },
+                        label = { Text("Courses") },
+                    )
+                }
+            }
+        },
+    ) { padding ->
+        NavHost(
+            nav,
+            startDestination = Route.TODAY,
+            modifier = Modifier.padding(padding),
+        ) {
+            composable(Route.TODAY) {
+                val vm: TodayViewModel = viewModel(factory = TodayViewModel.Factory)
+                val state by vm.state.collectAsStateWithLifecycle()
+
+                TodayScreen(
+                    user = user,
+                    state = state,
+                    onRefresh = vm::refresh,
+                    onOpenSession = { session ->
+                        // A teacher opens the register; a student who can mark
+                        // goes straight to the camera, otherwise to the course.
+                        val route = when {
+                            user.canManageCourses -> Route.session(session.slot())
+                            session.isOpen && !user.needsFaceEnrollment ->
+                                Route.mark(session.slot())
+                            else -> Route.studentCourse(session.courseName)
+                        }
+                        nav.navigate(route)
+                    },
+                )
+            }
+
+            studentGraph(nav, user, onLogout, onProfileChanged)
+            teacherGraph(nav, user, onLogout)
+        }
+    }
+}
+
+/** Standard bottom-nav behaviour: single copy, state preserved, no back pile-up. */
+private fun NavHostController.switchTopLevel(route: String) {
+    navigate(route) {
+        popUpTo(graph.findStartDestination().id) { saveState = true }
+        launchSingleTop = true
+        restoreState = true
     }
 }
 
@@ -219,6 +298,8 @@ private fun androidx.navigation.NavGraphBuilder.teacherGraph(
             onOpenCourse = { nav.navigate(Route.teacherCourse(it)) },
             onCreateCourse = vm::createCourse,
             onDeleteCourse = vm::deleteCourse,
+            onSetArchived = vm::setArchived,
+            onToggleShowArchived = vm::toggleShowArchived,
             onLogout = onLogout,
             onMessagesShown = vm::clearMessages,
         )
