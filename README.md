@@ -9,7 +9,7 @@ Our web app consists of three components: the front end, the back end, and the d
 - **Frontend**: ReactJS with Material UI and Redux Toolkit, for a dynamic and responsive interface.
 - **Backend**: Django REST Framework, with JWT authentication and role-based access control.
 - **Database**: SQLite, so the project runs from a fresh clone with no database server to install. The schema uses proper foreign keys and database-level constraints. *(Originally MySQL.)*
-- **Face Recognition**: [DeepFace](https://github.com/serengil/deepface) — a pre-built library installed straight from PyPI, behind a swappable interface. *(We first built our own model with TensorFlow and Keras, then a `face_recognition` + dlib setup that had to be compiled from source; both were dropped, the first for hardware constraints and the second because the build step made the project hard to set up.)*
+- **Face Recognition**: [DeepFace](https://github.com/serengil/deepface) — a pre-built library installed straight from PyPI, behind a swappable interface. *(We first built our own Siamese network with TensorFlow and Keras, then a `face_recognition` + dlib setup that had to be compiled from source; both were dropped, the first for hardware constraints and the second because the build step made the project hard to set up. The original notebook is kept in [archive/face-recognition-prototype/](archive/face-recognition-prototype/).)*
 
 ## What's so special about us?
 
