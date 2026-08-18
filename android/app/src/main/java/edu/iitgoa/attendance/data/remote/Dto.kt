@@ -27,6 +27,13 @@ data class UserDto(
     val email: String = "",
     val role: String,
     @SerialName("face_enrolled") val faceEnrolled: Boolean = false,
+    @SerialName("date_joined") val dateJoined: String? = null,
+)
+
+@Serializable
+data class UpdateProfileRequest(
+    val name: String? = null,
+    val email: String? = null,
 )
 
 @Serializable
@@ -227,4 +234,5 @@ data class CourseStatsDto(
 data class FaceEnrollmentDto(
     val username: String,
     @SerialName("model_name") val modelName: String,
+    @SerialName("created_at") val createdAt: String? = null,
 )

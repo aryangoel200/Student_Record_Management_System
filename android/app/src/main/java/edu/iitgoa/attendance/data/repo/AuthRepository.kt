@@ -9,7 +9,9 @@ import edu.iitgoa.attendance.data.local.TokenStore
 import edu.iitgoa.attendance.data.remote.AttendanceApi
 import edu.iitgoa.attendance.data.remote.LoginRequest
 import edu.iitgoa.attendance.data.remote.LogoutRequest
+import edu.iitgoa.attendance.data.remote.FaceEnrollmentDto
 import edu.iitgoa.attendance.data.remote.RegisterRequest
+import edu.iitgoa.attendance.data.remote.UpdateProfileRequest
 import edu.iitgoa.attendance.data.toCurrentUser
 
 class AuthRepository(
@@ -75,6 +77,23 @@ class AuthRepository(
             }
         }
     }
+
+    /** Edit your own name or email. Role is never editable from here. */
+    suspend fun updateProfile(name: String, email: String): ApiResult<CurrentUser> =
+        apiCall { api.updateProfile(UpdateProfileRequest(name.trim(), email.trim())) }
+            .map { it.toCurrentUser() }
+            .also { if (it is ApiResult.Ok) session.onSignedIn(it.value) }
+
+    /** Null when nothing is enrolled — a 404 is the expected answer, not an error. */
+    suspend fun faceEnrollment(): FaceEnrollmentDto? =
+        when (val result = apiCall { api.faceEnrollment() }) {
+            is ApiResult.Ok -> result.value.body()
+            is ApiResult.Err -> null
+        }
+
+    suspend fun removeFaceEnrollment(): ApiResult<Unit> =
+        apiCall { api.deleteFaceEnrollment().orThrow() }
+            .also { if (it is ApiResult.Ok) refreshProfile() }
 
     suspend fun logout() {
         // Blacklist the refresh token server-side so it cannot be replayed.

@@ -1,10 +1,11 @@
 package edu.iitgoa.attendance.data.remote
 
 import okhttp3.RequestBody
-import okhttp3.ResponseBody
 import retrofit2.Response
 import retrofit2.http.Body
+import retrofit2.http.DELETE
 import retrofit2.http.GET
+import retrofit2.http.PATCH
 import retrofit2.http.POST
 
 /**
@@ -28,6 +29,9 @@ interface AttendanceApi {
 
     @GET("Auth/profile")
     suspend fun profile(): UserDto
+
+    @PATCH("Auth/profile")
+    suspend fun updateProfile(@Body body: UpdateProfileRequest): UserDto
 
     // --- Courses ---
 
@@ -115,5 +119,9 @@ interface AttendanceApi {
     suspend fun enrollFace(@Body body: RequestBody): FaceEnrollmentDto
 
     @GET("Face_Recog/enrollment")
-    suspend fun faceEnrollment(): Response<ResponseBody>
+    suspend fun faceEnrollment(): Response<FaceEnrollmentDto>
+
+    /** Withdraw the stored face. The student can then enrol a new one. */
+    @DELETE("Face_Recog/enrollment")
+    suspend fun deleteFaceEnrollment(): Response<Unit>
 }

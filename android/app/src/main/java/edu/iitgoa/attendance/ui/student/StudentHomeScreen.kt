@@ -13,7 +13,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.Logout
+import androidx.compose.material.icons.filled.AccountCircle
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.Face
@@ -58,7 +58,7 @@ fun StudentHomeScreen(
     onOpenCourse: (String) -> Unit,
     onEnroll: (String) -> Unit,
     onEnrollFace: () -> Unit,
-    onLogout: () -> Unit,
+    onOpenProfile: () -> Unit,
     onMessagesShown: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -79,8 +79,8 @@ fun StudentHomeScreen(
             TopAppBar(
                 title = { Text("My courses") },
                 actions = {
-                    IconButton(onClick = onLogout) {
-                        Icon(Icons.AutoMirrored.Filled.Logout, contentDescription = "Sign out")
+                    IconButton(onClick = onOpenProfile) {
+                        Icon(Icons.Default.AccountCircle, contentDescription = "Account")
                     }
                 },
             )

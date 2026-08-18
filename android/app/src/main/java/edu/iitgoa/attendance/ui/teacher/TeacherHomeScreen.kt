@@ -14,7 +14,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.Logout
+import androidx.compose.material.icons.filled.AccountCircle
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Archive
 import androidx.compose.material.icons.filled.ContentCopy
@@ -66,7 +66,7 @@ fun TeacherHomeScreen(
     onDeleteCourse: (String) -> Unit,
     onSetArchived: (String, Boolean) -> Unit,
     onToggleShowArchived: () -> Unit,
-    onLogout: () -> Unit,
+    onOpenProfile: () -> Unit,
     onMessagesShown: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -99,8 +99,8 @@ fun TeacherHomeScreen(
                             },
                         )
                     }
-                    IconButton(onClick = onLogout) {
-                        Icon(Icons.AutoMirrored.Filled.Logout, contentDescription = "Sign out")
+                    IconButton(onClick = onOpenProfile) {
+                        Icon(Icons.Default.AccountCircle, contentDescription = "Account")
                     }
                 },
             )

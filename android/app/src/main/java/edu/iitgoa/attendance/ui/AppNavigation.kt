@@ -29,6 +29,8 @@ import edu.iitgoa.attendance.ui.auth.AuthViewModel
 import edu.iitgoa.attendance.ui.auth.LoginScreen
 import edu.iitgoa.attendance.ui.auth.SignupScreen
 import edu.iitgoa.attendance.ui.common.LoadingBox
+import edu.iitgoa.attendance.ui.profile.ProfileScreen
+import edu.iitgoa.attendance.ui.profile.ProfileViewModel
 import edu.iitgoa.attendance.ui.student.CourseSessionsScreen
 import edu.iitgoa.attendance.ui.student.CourseSessionsViewModel
 import edu.iitgoa.attendance.ui.student.FaceEnrollScreen
@@ -48,6 +50,7 @@ import edu.iitgoa.attendance.ui.today.TodayViewModel
 
 private object Route {
     const val TODAY = "today"
+    const val PROFILE = "profile"
     const val LOGIN = "login"
     const val SIGNUP = "signup"
 
@@ -176,6 +179,22 @@ private fun SignedInNavHost(
             startDestination = Route.TODAY,
             modifier = Modifier.padding(padding),
         ) {
+            composable(Route.PROFILE) {
+                val vm: ProfileViewModel = viewModel(factory = ProfileViewModel.Factory)
+                val state by vm.state.collectAsStateWithLifecycle()
+
+                ProfileScreen(
+                    user = user,
+                    state = state,
+                    onSave = vm::save,
+                    onEnrollFace = { nav.navigate(Route.FACE_ENROLL) },
+                    onRemoveFace = vm::removeFace,
+                    onLogout = onLogout,
+                    onBack = { nav.popBackStack() },
+                    onMessagesShown = vm::clearMessages,
+                )
+            }
+
             composable(Route.TODAY) {
                 val vm: TodayViewModel = viewModel(factory = TodayViewModel.Factory)
                 val state by vm.state.collectAsStateWithLifecycle()
@@ -184,6 +203,7 @@ private fun SignedInNavHost(
                     user = user,
                     state = state,
                     onRefresh = vm::refresh,
+                    onOpenProfile = { nav.navigate(Route.PROFILE) },
                     onOpenSession = { session ->
                         // A teacher opens the register; a student who can mark
                         // goes straight to the camera, otherwise to the course.
@@ -229,7 +249,7 @@ private fun androidx.navigation.NavGraphBuilder.studentGraph(
             onOpenCourse = { nav.navigate(Route.studentCourse(it)) },
             onEnroll = vm::enroll,
             onEnrollFace = { nav.navigate(Route.FACE_ENROLL) },
-            onLogout = onLogout,
+            onOpenProfile = { nav.navigate(Route.PROFILE) },
             onMessagesShown = vm::clearMessages,
         )
     }
@@ -300,7 +320,7 @@ private fun androidx.navigation.NavGraphBuilder.teacherGraph(
             onDeleteCourse = vm::deleteCourse,
             onSetArchived = vm::setArchived,
             onToggleShowArchived = vm::toggleShowArchived,
-            onLogout = onLogout,
+            onOpenProfile = { nav.navigate(Route.PROFILE) },
             onMessagesShown = vm::clearMessages,
         )
     }
