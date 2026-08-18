@@ -1,12 +1,13 @@
 from rest_framework import serializers
 
+from .fields import FaceImageField
 from .models import FaceEnrollment
 
 
 class FaceImageSerializer(serializers.Serializer):
-    image = serializers.CharField(
-        help_text="data: URL of a captured frame, e.g. data:image/png;base64,..."
-    )
+    """Accepts multipart (Android) or a base64 data URL (JSON clients)."""
+
+    image = FaceImageField()
 
 
 class FaceEnrollmentSerializer(serializers.ModelSerializer):

@@ -16,6 +16,7 @@ Our web app consists of three components: the front end, the back end, and the d
 While offering a reliable attendance system and enhancing traditional student record management with modern technologies, we've incorporated additional functionalities to elevate user experience and simplify record maintenance for teachers:
 
 - **Two-pronged anti-proxy security.** Marking attendance requires both a face that matches your enrolled photo and a device physically inside the classroom's geofence. Both checks run **on the server**, in the same request that records the attendance — a student cannot skip them by calling the API directly.
+- **Location you can actually trust.** Coordinates alone are only a claim, so the server also rejects fixes from Android's mock-location providers, rejects fixes too imprecise to place someone in a classroom, and can require a Google Play Integrity attestation — proof the request came from a genuine, unmodified build of the app on a genuine device.
 - **Role-based access control.** Three roles — student, teacher, admin — with ownership enforced per course, so a teacher can only manage the courses they actually teach.
 - **Teacher overrides for when technology fails.** Given the fluctuating bandwidth of campus WiFi, teachers can correct the register by hand. Overrides are recorded as such and attributed to the teacher who made them, so a corrected entry stays distinguishable from a verified one.
 - **Data integrity by construction.** Uniqueness and validity live in the database schema, so double enrolment, duplicate sessions, and double-marked attendance are impossible rather than merely discouraged.
@@ -68,9 +69,9 @@ pip install -r requirements-face.txt   # then set FACE_RECOGNITION_ENABLED=true
 
 With it disabled the server runs normally and the face endpoints return HTTP 503 — they refuse rather than letting unverified attendance through.
 
-Run the test suite with `python manage.py test` from `Backend/` (78 tests, ~30s, no ML dependencies needed).
+Run the test suite with `python manage.py test` from `Backend/` (102 tests, under a minute, no ML dependencies needed).
 
-> **Note:** the backend has been reworked; the frontend is still being migrated to the new API. See [Project Set Up](Project%20Set%20Up) for current status.
+> **Note:** the client is moving to a native **Android app (Kotlin + Jetpack Compose)**, and the API is built for it — `multipart/form-data` uploads, platform location signals, and device attestation. The React web app is no longer the focus and is not migrated to the new API. See [Project Set Up](Project%20Set%20Up) for current status.
 
 ## Team Details and their Contributions
 

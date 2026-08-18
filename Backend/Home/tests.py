@@ -11,13 +11,15 @@ from datetime import date, datetime, time
 from unittest import mock
 
 from django.core.cache import cache
-from django.test import TestCase
+from django.core.files.uploadedfile import SimpleUploadedFile
+from django.test import TestCase, override_settings
 from django.utils import timezone as dj_timezone
 from PIL import Image
 from rest_framework import status
 from rest_framework.test import APIClient
 
 from Auth.models import Role, User
+from common.integrity import DeviceIntegrityUnavailable, IntegrityVerdict
 from Face_Recognation.models import FaceEnrollment
 from Face_Recognation.services import NoFaceDetected
 
@@ -524,6 +526,344 @@ class MarkAttendanceTests(BaseAPITestCase):
 
         self.assertEqual(response.status_code, status.HTTP_503_SERVICE_UNAVAILABLE)
         self.assertEqual(AttendanceRecord.objects.count(), 0)
+
+
+class MultipartUploadTests(BaseAPITestCase):
+    """The Android client posts multipart/form-data, not a base64 data URL."""
+
+    def setUp(self):
+        super().setUp()
+        self.session = self.make_session()
+        FaceEnrollment.objects.create(
+            user=self.student, embedding=[1.0, 0.0, 0.0], model_name="stub"
+        )
+
+    def jpeg_upload(self, name="frame.jpg", size=(64, 64)):
+        buffer = io.BytesIO()
+        Image.new("RGB", size, (90, 110, 130)).save(buffer, format="JPEG", quality=80)
+        return SimpleUploadedFile(name, buffer.getvalue(), content_type="image/jpeg")
+
+    def post_multipart(self, **overrides):
+        self.as_(self.student)
+        payload = self.slot(
+            self.session,
+            lat=str(CAMPUS_LAT),
+            lon=str(CAMPUS_LON),
+            image=self.jpeg_upload(),
+        )
+        payload.update(overrides)
+        with mock.patch(
+            "Home.views.get_face_backend", return_value=StubFaceBackend()
+        ):
+            return self.client.post(
+                "/api/Home/attendance", payload, format="multipart"
+            )
+
+    @freeze_now()
+    def test_a_jpeg_file_part_is_accepted(self):
+        response = self.post_multipart()
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(AttendanceRecord.objects.get().student, self.student)
+
+    @freeze_now()
+    def test_multipart_string_fields_are_coerced(self):
+        """Every multipart field arrives as text, including lat/lon and booleans."""
+        response = self.post_multipart(is_mock_location="false")
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+
+    @freeze_now()
+    def test_face_enrolment_also_accepts_a_file_part(self):
+        self.as_(self.other_student)
+        with mock.patch(
+            "Face_Recognation.views.get_face_backend", return_value=StubFaceBackend()
+        ):
+            response = self.client.post(
+                "/api/Face_Recog/register_image",
+                {"image": self.jpeg_upload()},
+                format="multipart",
+            )
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertTrue(
+            FaceEnrollment.objects.filter(user=self.other_student).exists()
+        )
+
+    @freeze_now()
+    def test_an_oversized_upload_is_rejected(self):
+        oversized = SimpleUploadedFile(
+            "big.jpg", b"\xff" * (9 * 1024 * 1024), content_type="image/jpeg"
+        )
+        response = self.post_multipart(image=oversized)
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(AttendanceRecord.objects.count(), 0)
+
+    @freeze_now()
+    def test_a_non_image_part_is_rejected(self):
+        junk = SimpleUploadedFile(
+            "notes.txt", b"definitely not a photograph", content_type="text/plain"
+        )
+        response = self.post_multipart(image=junk)
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(AttendanceRecord.objects.count(), 0)
+
+
+class LocationSignalTests(BaseAPITestCase):
+    """Mock-provider and accuracy gates on the reported position."""
+
+    def setUp(self):
+        super().setUp()
+        self.session = self.make_session()
+        FaceEnrollment.objects.create(
+            user=self.student, embedding=[1.0, 0.0, 0.0], model_name="stub"
+        )
+        self.image = sample_image_data_url()
+
+    def mark(self, **overrides):
+        self.as_(self.student)
+        payload = self.slot(
+            self.session, lat=CAMPUS_LAT, lon=CAMPUS_LON, image=self.image
+        )
+        payload.update(overrides)
+        with mock.patch(
+            "Home.views.get_face_backend", return_value=StubFaceBackend()
+        ):
+            return self.client.post("/api/Home/attendance", payload, format="json")
+
+    @freeze_now()
+    def test_a_mocked_location_is_refused(self):
+        response = self.mark(is_mock_location=True)
+
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(AttendanceRecord.objects.count(), 0)
+
+    @freeze_now()
+    def test_the_mock_flag_defaults_to_false_when_absent(self):
+        """Older clients that never send the field must still work."""
+        self.assertEqual(self.mark().status_code, status.HTTP_201_CREATED)
+
+    @freeze_now()
+    @override_settings(REJECT_MOCK_LOCATION=False)
+    def test_the_mock_gate_can_be_switched_off(self):
+        response = self.mark(is_mock_location=True)
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+
+    @freeze_now()
+    @override_settings(MAX_LOCATION_ACCURACY_M=50.0)
+    def test_an_imprecise_fix_is_refused(self):
+        response = self.mark(location_accuracy_m=500.0)
+
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(response.data["accuracy_m"], 500.0)
+        self.assertEqual(AttendanceRecord.objects.count(), 0)
+
+    @freeze_now()
+    @override_settings(MAX_LOCATION_ACCURACY_M=50.0)
+    def test_a_precise_fix_passes(self):
+        self.assertEqual(
+            self.mark(location_accuracy_m=12.5).status_code, status.HTTP_201_CREATED
+        )
+
+    @freeze_now()
+    def test_accuracy_is_optional(self):
+        self.assertEqual(self.mark().status_code, status.HTTP_201_CREATED)
+
+
+class StubIntegrityVerifier:
+    name = "stub"
+
+    def __init__(self, ok=True, reason="Device failed attestation.", raises=None):
+        self.ok = ok
+        self.reason = reason
+        self.raises = raises
+        self.seen_nonce = None
+
+    def verify(self, token, nonce):
+        if self.raises:
+            raise self.raises
+        self.seen_nonce = nonce
+        return (
+            IntegrityVerdict.passed()
+            if self.ok
+            else IntegrityVerdict.failed(self.reason)
+        )
+
+
+@override_settings(
+    DEVICE_INTEGRITY={
+        "REQUIRED": True,
+        "PACKAGE_NAME": "ac.in.iitgoa.attendance",
+        "CREDENTIALS_FILE": "",
+        "NONCE_TTL_SECONDS": 300,
+    }
+)
+class DeviceIntegrityTests(BaseAPITestCase):
+    def setUp(self):
+        super().setUp()
+        self.session = self.make_session()
+        FaceEnrollment.objects.create(
+            user=self.student, embedding=[1.0, 0.0, 0.0], model_name="stub"
+        )
+        self.image = sample_image_data_url()
+
+    def challenge(self, user=None):
+        self.as_(user or self.student)
+        response = self.client.post("/api/Home/attendance/challenge", {}, format="json")
+        return response.data["nonce"]
+
+    def mark(self, verifier=None, user=None, **overrides):
+        self.as_(user or self.student)
+        payload = self.slot(
+            self.session, lat=CAMPUS_LAT, lon=CAMPUS_LON, image=self.image
+        )
+        payload.update(overrides)
+        with mock.patch(
+            "Home.views.get_face_backend", return_value=StubFaceBackend()
+        ), mock.patch(
+            "Home.views.get_integrity_verifier",
+            return_value=verifier or StubIntegrityVerifier(),
+        ):
+            return self.client.post("/api/Home/attendance", payload, format="json")
+
+    def test_challenge_issues_a_nonce_and_advertises_the_requirement(self):
+        self.as_(self.student)
+        response = self.client.post("/api/Home/attendance/challenge", {}, format="json")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertTrue(response.data["nonce"])
+        self.assertTrue(response.data["integrity_required"])
+        self.assertEqual(response.data["expires_in"], 300)
+
+    def test_challenge_requires_a_student(self):
+        self.as_(self.teacher)
+        response = self.client.post("/api/Home/attendance/challenge", {}, format="json")
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_two_challenges_return_different_nonces(self):
+        self.assertNotEqual(self.challenge(), self.challenge())
+
+    @freeze_now()
+    def test_a_valid_token_and_nonce_are_accepted(self):
+        nonce = self.challenge()
+        verifier = StubIntegrityVerifier()
+        response = self.mark(
+            verifier=verifier, integrity_token="tok", integrity_nonce=nonce
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        # The nonce reached the verifier, so the token really is bound to it.
+        self.assertEqual(verifier.seen_nonce, nonce)
+
+    @freeze_now()
+    def test_a_missing_token_is_refused(self):
+        response = self.mark()
+
+        self.assertEqual(response.status_code, status.HTTP_428_PRECONDITION_REQUIRED)
+        self.assertEqual(AttendanceRecord.objects.count(), 0)
+
+    @freeze_now()
+    def test_an_unknown_nonce_is_refused(self):
+        response = self.mark(integrity_token="tok", integrity_nonce="never-issued")
+
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(AttendanceRecord.objects.count(), 0)
+
+    @freeze_now()
+    def test_a_nonce_cannot_be_replayed(self):
+        nonce = self.challenge()
+        first = self.mark(integrity_token="tok", integrity_nonce=nonce)
+        self.assertEqual(first.status_code, status.HTTP_201_CREATED)
+
+        AttendanceRecord.objects.all().delete()
+        second = self.mark(integrity_token="tok", integrity_nonce=nonce)
+
+        self.assertEqual(second.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(AttendanceRecord.objects.count(), 0)
+
+    @freeze_now()
+    def test_another_students_nonce_is_not_usable(self):
+        stolen = self.challenge(user=self.other_student)
+        response = self.mark(
+            user=self.student, integrity_token="tok", integrity_nonce=stolen
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(AttendanceRecord.objects.count(), 0)
+
+    @freeze_now()
+    def test_a_failed_verdict_is_refused(self):
+        nonce = self.challenge()
+        response = self.mark(
+            verifier=StubIntegrityVerifier(ok=False, reason="Rooted device."),
+            integrity_token="tok",
+            integrity_nonce=nonce,
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(response.data["detail"], "Rooted device.")
+        self.assertEqual(AttendanceRecord.objects.count(), 0)
+
+    @freeze_now()
+    def test_a_failed_verdict_still_burns_the_nonce(self):
+        nonce = self.challenge()
+        self.mark(
+            verifier=StubIntegrityVerifier(ok=False),
+            integrity_token="tok",
+            integrity_nonce=nonce,
+        )
+        retry = self.mark(integrity_token="tok", integrity_nonce=nonce)
+
+        self.assertEqual(retry.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(AttendanceRecord.objects.count(), 0)
+
+    @freeze_now()
+    def test_an_unconfigured_verifier_fails_closed(self):
+        """Requiring integrity without the deps must refuse, never skip."""
+        nonce = self.challenge()
+        response = self.mark(
+            verifier=StubIntegrityVerifier(
+                raises=DeviceIntegrityUnavailable("Not installed.")
+            ),
+            integrity_token="tok",
+            integrity_nonce=nonce,
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_503_SERVICE_UNAVAILABLE)
+        self.assertEqual(AttendanceRecord.objects.count(), 0)
+
+
+class IntegrityNotRequiredTests(BaseAPITestCase):
+    """With the feature off, clients need not send a token at all."""
+
+    def setUp(self):
+        super().setUp()
+        self.session = self.make_session()
+        FaceEnrollment.objects.create(
+            user=self.student, embedding=[1.0, 0.0, 0.0], model_name="stub"
+        )
+
+    @freeze_now()
+    def test_attendance_works_without_any_integrity_fields(self):
+        self.as_(self.student)
+        payload = self.slot(
+            self.session,
+            lat=CAMPUS_LAT,
+            lon=CAMPUS_LON,
+            image=sample_image_data_url(),
+        )
+        with mock.patch(
+            "Home.views.get_face_backend", return_value=StubFaceBackend()
+        ):
+            response = self.client.post(
+                "/api/Home/attendance", payload, format="json"
+            )
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+
+    def test_challenge_reports_that_integrity_is_optional(self):
+        self.as_(self.student)
+        response = self.client.post("/api/Home/attendance/challenge", {}, format="json")
+        self.assertFalse(response.data["integrity_required"])
 
 
 class ManualAttendanceTests(BaseAPITestCase):

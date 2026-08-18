@@ -51,16 +51,32 @@ class BackendUnavailable(FaceRecognitionError):
     """Face recognition is switched off, or its dependencies are missing."""
 
 
-def decode_image(data_url):
-    """Turn a browser `data:` URL into an RGB numpy array."""
-    if not isinstance(data_url, str) or not data_url.strip():
-        raise InvalidImage("No image supplied.")
-
+def _bytes_from_data_url(data_url):
     payload = _DATA_URL_RE.sub("", data_url.strip(), count=1)
     try:
-        raw = base64.b64decode(payload, validate=True)
+        return base64.b64decode(payload, validate=True)
     except (binascii.Error, ValueError):
         raise InvalidImage("Image is not valid base64 data.") from None
+
+
+def decode_image(source):
+    """Turn a captured frame into an RGB numpy array.
+
+    Accepts whatever the two client kinds send:
+      - `bytes`, or an uploaded file, from a native client posting multipart
+      - a `data:` URL string, from a browser's canvas.toDataURL()
+    """
+    if isinstance(source, (bytes, bytearray, memoryview)):
+        raw = bytes(source)
+    elif hasattr(source, "read"):
+        raw = source.read()
+    elif isinstance(source, str):
+        if not source.strip():
+            raise InvalidImage("No image supplied.")
+        raw = _bytes_from_data_url(source)
+    else:
+        raise InvalidImage("No image supplied.")
+
     if not raw:
         raise InvalidImage("Image is empty.")
 

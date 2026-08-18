@@ -202,6 +202,26 @@ FACE_RECOGNITION = {
 
 DEFAULT_SESSION_RADIUS_M = env_float("DEFAULT_SESSION_RADIUS_M", 100.0)
 
+# Refuse attendance when Android reports the fix came from a mock provider.
+REJECT_MOCK_LOCATION = env_bool("REJECT_MOCK_LOCATION", default=True)
+
+# Reject location fixes vaguer than this (metres, from Location.getAccuracy()).
+# A coarse network fix can cover a whole neighbourhood, which would otherwise
+# let someone satisfy the geofence from outside it.
+MAX_LOCATION_ACCURACY_M = env_float("MAX_LOCATION_ACCURACY_M", 100.0)
+
+# Largest captured frame accepted, in bytes. A 720p JPEG is ~150 KB.
+MAX_FACE_IMAGE_BYTES = int(env_float("MAX_FACE_IMAGE_BYTES", 8 * 1024 * 1024))
+
+# Google Play Integrity. Opt-in, because it needs a Play Console app and a
+# service account — but once required it fails closed.
+DEVICE_INTEGRITY = {
+    "REQUIRED": env_bool("DEVICE_INTEGRITY_REQUIRED", default=False),
+    "PACKAGE_NAME": os.environ.get("ANDROID_PACKAGE_NAME", ""),
+    "CREDENTIALS_FILE": os.environ.get("PLAY_INTEGRITY_CREDENTIALS", ""),
+    "NONCE_TTL_SECONDS": env_float("INTEGRITY_NONCE_TTL_SECONDS", 300),
+}
+
 if not DEBUG:
     SECURE_CONTENT_TYPE_NOSNIFF = True
     SESSION_COOKIE_SECURE = True

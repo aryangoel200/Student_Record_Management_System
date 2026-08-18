@@ -1,7 +1,13 @@
 import logging
 
 from rest_framework import status
-from rest_framework.decorators import api_view, permission_classes, throttle_classes
+from rest_framework.decorators import (
+    api_view,
+    parser_classes,
+    permission_classes,
+    throttle_classes,
+)
+from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.throttling import ScopedRateThrottle
@@ -17,6 +23,7 @@ logger = logging.getLogger(__name__)
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
 @throttle_classes([ScopedRateThrottle])
+@parser_classes([MultiPartParser, FormParser, JSONParser])
 def register_image(request):
     """Enrol (or re-enrol) the *calling user's* reference face.
 

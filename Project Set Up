@@ -62,17 +62,38 @@ These cover the role matrix, course ownership, and the attendance rules
 (geofence, session window, duplicate marking, face match). They stub the face
 model out, so they run without the TensorFlow install.
 
-Frontend (React)
-----------------
+Device integrity (optional, Android)
+------------------------------------
 
-    cd frontend
-    npm install
-    npm start
+Off by default. To require Google Play Integrity attestation:
 
-Copy frontend/.env.example to frontend/.env if the API is not on
-http://127.0.0.1:8000/api/.
+    pip install -r requirements-integrity.txt
 
-NOTE: the frontend has not been migrated to the reworked API yet. The axios
-client and the auth hooks are updated; the components still expect the old
-request/response shapes, so the app will not work end to end until they are
-brought across.
+then set DEVICE_INTEGRITY_REQUIRED=true, ANDROID_PACKAGE_NAME, and
+PLAY_INTEGRITY_CREDENTIALS in Backend/.env. You need a Play Console app and a
+service account with the Play Integrity API enabled.
+
+Once required it fails closed: if the verifier cannot run, attendance is
+refused rather than allowed through.
+
+The client flow is:
+
+    POST Home/attendance/challenge   -> {"nonce": "..."}
+    request a Play Integrity token using that nonce
+    POST Home/attendance             with integrity_token + integrity_nonce
+
+Nonces are single-use and expire after INTEGRITY_NONCE_TTL_SECONDS, so a
+captured token cannot be replayed against a later session.
+
+Client
+------
+
+The client is moving to a native Android app (Kotlin + Jetpack Compose). The API
+is built for it: multipart/form-data frame uploads, platform location signals
+(Location.getAccuracy, Location.isMock), and device attestation.
+
+See Backend/README.md for the full API reference and the attendance payload.
+
+The React web app in frontend/ is no longer the focus. Its axios client and auth
+hooks were updated, but the components still expect the old request and response
+shapes, so it does not work end to end against the current API.
