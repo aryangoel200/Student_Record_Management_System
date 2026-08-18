@@ -23,7 +23,7 @@ from common.integrity import DeviceIntegrityUnavailable, IntegrityVerdict
 from Face_Recognation.models import FaceEnrollment
 from Face_Recognation.services import NoFaceDetected
 
-from .models import AttendanceRecord, Course, Enrollment, Session
+from .models import AttendanceRecord, Course, Enrollment, Repeat, Session
 
 # A point on the IIT Goa campus, and one ~1.5 km away.
 CAMPUS_LAT, CAMPUS_LON = 15.3925, 73.8785
@@ -978,3 +978,396 @@ class RosterAndStatsTests(BaseAPITestCase):
             "/api/Home/show_students", {"course_name": "NOPE"}, format="json"
         )
         self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+
+# --- New feature coverage --------------------------------------------------
+
+
+class RecurrenceExpansionTests(TestCase):
+    """The date maths, isolated from HTTP."""
+
+    def test_no_repeat_yields_only_the_start(self):
+        from .recurrence import expand
+
+        self.assertEqual(expand(date(2026, 3, 10), Repeat.NONE), [date(2026, 3, 10)])
+
+    def test_weekly_steps_by_seven_days(self):
+        from .recurrence import expand
+
+        dates = expand(date(2026, 3, 10), Repeat.WEEKLY, count=3)
+        self.assertEqual(
+            dates, [date(2026, 3, 10), date(2026, 3, 17), date(2026, 3, 24)]
+        )
+
+    def test_interval_two_weekly_is_fortnightly(self):
+        from .recurrence import expand
+
+        dates = expand(date(2026, 3, 10), Repeat.WEEKLY, interval=2, count=3)
+        self.assertEqual(
+            dates, [date(2026, 3, 10), date(2026, 3, 24), date(2026, 4, 7)]
+        )
+
+    def test_monthly_keeps_the_day_of_month(self):
+        from .recurrence import expand
+
+        dates = expand(date(2026, 1, 15), Repeat.MONTHLY, count=3)
+        self.assertEqual(
+            dates, [date(2026, 1, 15), date(2026, 2, 15), date(2026, 3, 15)]
+        )
+
+    def test_monthly_skips_months_that_are_too_short(self):
+        """The 31st recurring monthly must never silently land on the 28th."""
+        from .recurrence import expand
+
+        dates = expand(date(2026, 1, 31), Repeat.MONTHLY, count=4)
+        self.assertNotIn(date(2026, 2, 28), dates)
+        self.assertEqual(dates[0], date(2026, 1, 31))
+        self.assertTrue(all(d.day == 31 for d in dates))
+
+    def test_until_stops_the_series(self):
+        from .recurrence import expand
+
+        dates = expand(
+            date(2026, 3, 10), Repeat.WEEKLY, count=60, until=date(2026, 3, 25)
+        )
+        self.assertEqual(dates, [date(2026, 3, 10), date(2026, 3, 17), date(2026, 3, 24)])
+
+    def test_count_is_capped(self):
+        from .recurrence import expand
+        from .recurrence import MAX_OCCURRENCES
+
+        dates = expand(date(2026, 3, 10), Repeat.DAILY, count=10_000)
+        self.assertEqual(len(dates), MAX_OCCURRENCES)
+
+
+class RecurringSessionApiTests(BaseAPITestCase):
+    def payload(self, **extra):
+        base = {
+            "course_name": "CS210",
+            "date": "2026-03-10",
+            "start_time": "10:00",
+            "end_time": "11:00",
+            "lat": CAMPUS_LAT,
+            "lon": CAMPUS_LON,
+        }
+        base.update(extra)
+        return base
+
+    def test_weekly_series_creates_one_row_per_occurrence(self):
+        self.as_(self.teacher)
+        response = self.client.post(
+            "/api/Home/create",
+            self.payload(repeat="weekly", repeat_count=4),
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(len(response.data["created"]), 4)
+        self.assertEqual(Session.objects.count(), 4)
+
+        # All share one series id, so the batch can be managed together.
+        series = {s.series_id for s in Session.objects.all()}
+        self.assertEqual(len(series), 1)
+        self.assertIsNotNone(series.pop())
+
+    def test_monthly_series_over_a_short_month(self):
+        self.as_(self.teacher)
+        response = self.client.post(
+            "/api/Home/create",
+            self.payload(date="2026-01-31", repeat="monthly", repeat_count=3),
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        for session in Session.objects.all():
+            self.assertEqual(session.date.day, 31)
+
+    def test_repeat_requires_a_bound(self):
+        self.as_(self.teacher)
+        response = self.client.post(
+            "/api/Home/create", self.payload(repeat="weekly"), format="json"
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(Session.objects.count(), 0)
+
+    def test_overlapping_dates_are_skipped_not_fatal(self):
+        self.make_session(date=date(2026, 3, 17))
+        self.as_(self.teacher)
+        response = self.client.post(
+            "/api/Home/create",
+            self.payload(repeat="weekly", repeat_count=3),
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(len(response.data["created"]), 2)
+        self.assertEqual(response.data["skipped"], ["2026-03-17"])
+
+    def test_a_single_session_has_no_series_id(self):
+        self.as_(self.teacher)
+        response = self.client.post("/api/Home/create", self.payload(), format="json")
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertIsNone(response.data["series_id"])
+        self.assertIsNone(Session.objects.get().series_id)
+
+    def test_owner_can_delete_a_whole_series(self):
+        self.as_(self.teacher)
+        created = self.client.post(
+            "/api/Home/create",
+            self.payload(repeat="weekly", repeat_count=4),
+            format="json",
+        )
+        series_id = created.data["series_id"]
+
+        response = self.client.post(
+            "/api/Home/delete_session_series",
+            {"series_id": series_id},
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(Session.objects.count(), 0)
+
+    def test_another_teacher_cannot_delete_the_series(self):
+        self.as_(self.teacher)
+        created = self.client.post(
+            "/api/Home/create",
+            self.payload(repeat="weekly", repeat_count=3),
+            format="json",
+        )
+        self.as_(self.other_teacher)
+        response = self.client.post(
+            "/api/Home/delete_session_series",
+            {"series_id": created.data["series_id"]},
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(Session.objects.count(), 3)
+
+
+class ArchiveCourseTests(BaseAPITestCase):
+    def archive(self, archived=True, user=None):
+        self.as_(user or self.teacher)
+        return self.client.post(
+            "/api/Home/archive_course",
+            {"course_name": "CS210", "archived": archived},
+            format="json",
+        )
+
+    def test_owner_can_archive_and_restore(self):
+        self.assertEqual(self.archive().status_code, status.HTTP_200_OK)
+        self.course.refresh_from_db()
+        self.assertTrue(self.course.is_archived)
+
+        self.assertEqual(self.archive(archived=False).status_code, status.HTTP_200_OK)
+        self.course.refresh_from_db()
+        self.assertFalse(self.course.is_archived)
+
+    def test_archiving_deletes_nothing(self):
+        session = self.make_session()
+        AttendanceRecord.objects.create(session=session, student=self.student)
+        self.archive()
+
+        self.assertEqual(Session.objects.count(), 1)
+        self.assertEqual(AttendanceRecord.objects.count(), 1)
+        self.assertEqual(Enrollment.objects.count(), 1)
+
+    def test_archived_courses_drop_out_of_both_lists(self):
+        self.archive()
+
+        self.as_(self.teacher)
+        self.assertEqual(
+            self.client.post("/api/Home/show_created", {}, format="json").data, []
+        )
+        self.as_(self.student)
+        self.assertEqual(
+            self.client.post("/api/Home/show_enrolled", {}, format="json").data, []
+        )
+
+    def test_archived_courses_can_still_be_listed_explicitly(self):
+        self.archive()
+        self.as_(self.teacher)
+        response = self.client.post(
+            "/api/Home/show_created", {"include_archived": True}, format="json"
+        )
+        self.assertEqual([c["name"] for c in response.data], ["CS210"])
+        self.assertTrue(response.data[0]["is_archived"])
+
+    def test_no_new_sessions_on_an_archived_course(self):
+        self.archive()
+        self.as_(self.teacher)
+        response = self.client.post(
+            "/api/Home/create",
+            {
+                "course_name": "CS210",
+                "date": "2026-03-10",
+                "start_time": "10:00",
+                "end_time": "11:00",
+                "lat": CAMPUS_LAT,
+                "lon": CAMPUS_LON,
+            },
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
+
+    def test_students_cannot_archive(self):
+        self.assertEqual(
+            self.archive(user=self.student).status_code, status.HTTP_403_FORBIDDEN
+        )
+
+    def test_another_teacher_cannot_archive(self):
+        self.assertEqual(
+            self.archive(user=self.other_teacher).status_code,
+            status.HTTP_403_FORBIDDEN,
+        )
+
+
+class TodayFeedTests(BaseAPITestCase):
+    @freeze_now()
+    def test_live_session_comes_first(self):
+        later = self.make_session(start_time=time(14, 0), end_time=time(15, 0))
+        live = self.make_session()  # 10:00-11:00, frozen now is 10:30
+        earlier = self.make_session(start_time=time(8, 0), end_time=time(9, 0))
+
+        self.as_(self.student)
+        response = self.client.post("/api/Home/today", {}, format="json")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        ids = [s["id"] for s in response.data["sessions"]]
+        self.assertEqual(ids[0], live.id)
+        self.assertEqual(response.data["open_count"], 1)
+        # Upcoming before finished.
+        self.assertLess(ids.index(later.id), ids.index(earlier.id))
+
+    @freeze_now()
+    def test_is_open_is_reported_by_the_server(self):
+        self.make_session()
+        self.as_(self.student)
+        response = self.client.post("/api/Home/today", {}, format="json")
+        self.assertTrue(response.data["sessions"][0]["is_open"])
+
+    @freeze_now()
+    def test_student_sees_their_own_presence(self):
+        session = self.make_session()
+        AttendanceRecord.objects.create(session=session, student=self.student)
+
+        self.as_(self.student)
+        response = self.client.post("/api/Home/today", {}, format="json")
+        self.assertEqual(response.data["sessions"][0]["presence"], "present")
+
+    @freeze_now()
+    def test_teacher_sees_a_live_present_count(self):
+        session = self.make_session()
+        AttendanceRecord.objects.create(session=session, student=self.student)
+
+        self.as_(self.teacher)
+        response = self.client.post("/api/Home/today", {}, format="json")
+        self.assertEqual(response.data["sessions"][0]["present_count"], 1)
+
+    @freeze_now()
+    def test_spans_every_course_not_just_one(self):
+        second = Course.objects.create(
+            name="CS999", teacher=self.teacher, verification_code="QQQQ2222"
+        )
+        Enrollment.objects.create(course=second, student=self.student)
+        self.make_session()
+        Session.objects.create(
+            course=second, date=date(2026, 3, 10), start_time=time(12, 0),
+            end_time=time(13, 0), lat=CAMPUS_LAT, lon=CAMPUS_LON, radius_m=100.0,
+        )
+
+        self.as_(self.student)
+        response = self.client.post("/api/Home/today", {}, format="json")
+        names = {s["course_name"] for s in response.data["sessions"]}
+        self.assertEqual(names, {"CS210", "CS999"})
+
+    @freeze_now()
+    def test_other_days_are_excluded(self):
+        self.make_session(date=date(2026, 3, 11))
+        self.as_(self.student)
+        response = self.client.post("/api/Home/today", {}, format="json")
+        self.assertEqual(response.data["sessions"], [])
+
+    @freeze_now()
+    def test_archived_courses_are_excluded(self):
+        self.make_session()
+        self.course.archive()
+        self.as_(self.student)
+        response = self.client.post("/api/Home/today", {}, format="json")
+        self.assertEqual(response.data["sessions"], [])
+
+    def test_requires_authentication(self):
+        self.client.force_authenticate(user=None)
+        self.assertEqual(
+            self.client.post("/api/Home/today", {}, format="json").status_code,
+            status.HTTP_401_UNAUTHORIZED,
+        )
+
+
+class CourseStudentStatsTests(BaseAPITestCase):
+    def setUp(self):
+        super().setUp()
+        Enrollment.objects.create(course=self.course, student=self.other_student)
+
+    def test_per_student_rows_with_percentages(self):
+        a = self.make_session()
+        b = self.make_session(start_time=time(14, 0), end_time=time(15, 0))
+        AttendanceRecord.objects.create(session=a, student=self.student)
+        AttendanceRecord.objects.create(session=b, student=self.student)
+        AttendanceRecord.objects.create(
+            session=a, student=self.other_student,
+            method=AttendanceRecord.Method.MANUAL, marked_by=self.teacher,
+        )
+
+        self.as_(self.teacher)
+        response = self.client.post(
+            "/api/Home/course_student_stats", {"course_name": "CS210"}, format="json"
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["total_sessions"], 2)
+        rows = {r["username"]: r for r in response.data["students"]}
+
+        self.assertEqual(rows["2021BCS001"]["attended"], 2)
+        self.assertEqual(rows["2021BCS001"]["attendance_pct"], 100.0)
+        self.assertEqual(rows["2021BCS002"]["attended"], 1)
+        self.assertEqual(rows["2021BCS002"]["attendance_pct"], 50.0)
+        self.assertEqual(rows["2021BCS002"]["manual_count"], 1)
+
+    def test_lowest_attendance_is_listed_first(self):
+        a = self.make_session()
+        AttendanceRecord.objects.create(session=a, student=self.student)
+
+        self.as_(self.teacher)
+        response = self.client.post(
+            "/api/Home/course_student_stats", {"course_name": "CS210"}, format="json"
+        )
+        self.assertEqual(response.data["students"][0]["username"], "2021BCS002")
+
+    def test_handles_a_course_with_no_sessions(self):
+        self.as_(self.teacher)
+        response = self.client.post(
+            "/api/Home/course_student_stats", {"course_name": "CS210"}, format="json"
+        )
+        self.assertEqual(response.data["total_sessions"], 0)
+        self.assertTrue(all(r["attendance_pct"] == 0.0 for r in response.data["students"]))
+
+    def test_reports_whether_a_face_is_enrolled(self):
+        FaceEnrollment.objects.create(
+            user=self.student, embedding=[1.0], model_name="stub"
+        )
+        self.as_(self.teacher)
+        response = self.client.post(
+            "/api/Home/course_student_stats", {"course_name": "CS210"}, format="json"
+        )
+        rows = {r["username"]: r for r in response.data["students"]}
+        self.assertTrue(rows["2021BCS001"]["face_enrolled"])
+        self.assertFalse(rows["2021BCS002"]["face_enrolled"])
+
+    def test_only_the_owner_can_see_it(self):
+        for user in (self.other_teacher, self.student):
+            self.as_(user)
+            self.assertEqual(
+                self.client.post(
+                    "/api/Home/course_student_stats",
+                    {"course_name": "CS210"},
+                    format="json",
+                ).status_code,
+                status.HTTP_403_FORBIDDEN,
+            )

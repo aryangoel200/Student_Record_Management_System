@@ -11,6 +11,8 @@ urlpatterns = [
     path("show_students", views.show_students, name="show_students"),
     path("delete_course", views.delete_course, name="delete_course"),
     path("course_stats", views.course_stats, name="course_stats"),
+    path("course_student_stats", views.course_student_stats, name="course_student_stats"),
+    path("archive_course", views.archive_course, name="archive_course"),
     # Sessions
     path("create", views.create_new_session, name="create_session"),
     path("show_sessions", views.show_sessions, name="show_sessions"),
@@ -21,6 +23,10 @@ urlpatterns = [
         name="show_students_in_session",
     ),
     path("delete_session", views.delete_session, name="delete_session"),
+    path("delete_session_series", views.delete_session_series, name="delete_session_series"),
+    # Today — one chronological agenda across every course.
+    path("today", views.today, name="today"),
+
     # Attendance
     path(
         "attendance/challenge",

@@ -4,7 +4,7 @@ from rest_framework import serializers
 from Auth.models import Role, User
 from Face_Recognation.fields import FaceImageField
 
-from .models import AttendanceRecord, Course, Session
+from .models import AttendanceRecord, Course, Repeat, Session
 
 # --- Output ----------------------------------------------------------------
 
@@ -13,6 +13,7 @@ class CourseSerializer(serializers.ModelSerializer):
     teacher = serializers.CharField(source="teacher.username", read_only=True)
     teacher_name = serializers.CharField(source="teacher.name", read_only=True)
     enrolled_count = serializers.IntegerField(read_only=True)
+    is_archived = serializers.BooleanField(read_only=True)
 
     class Meta:
         model = Course
@@ -24,6 +25,7 @@ class CourseSerializer(serializers.ModelSerializer):
             "teacher_name",
             "enrolled_count",
             "created_at",
+            "is_archived",
         ]
 
 
@@ -31,13 +33,17 @@ class EnrolledCourseSerializer(CourseSerializer):
     """What a student sees: the code is the teacher's to share, not ours."""
 
     class Meta(CourseSerializer.Meta):
-        fields = ["id", "name", "teacher", "teacher_name", "created_at"]
+        fields = ["id", "name", "teacher", "teacher_name", "created_at", "is_archived"]
 
 
 class SessionSerializer(serializers.ModelSerializer):
     course_name = serializers.CharField(source="course.name", read_only=True)
     # Annotated per-request for the student viewing their own record.
     presence = serializers.SerializerMethodField()
+    # Lets the client show one session as live without re-deriving it from the
+    # clock, which would disagree with the server across time zones.
+    is_open = serializers.SerializerMethodField()
+    present_count = serializers.SerializerMethodField()
 
     class Meta:
         model = Session
@@ -51,7 +57,18 @@ class SessionSerializer(serializers.ModelSerializer):
             "lon",
             "radius_m",
             "presence",
+            "is_open",
+            "present_count",
+            "repeat",
+            "series_id",
         ]
+
+    def get_is_open(self, obj):
+        return obj.is_open()
+
+    def get_present_count(self, obj):
+        # Only annotated where a teacher asked for it, to avoid an N+1.
+        return getattr(obj, "present_count", None)
 
     def get_presence(self, obj):
         present_ids = self.context.get("present_session_ids")
@@ -119,12 +136,37 @@ class SessionCreateSerializer(SessionSlotSerializer):
     lon = serializers.FloatField(min_value=-180.0, max_value=180.0)
     radius_m = serializers.FloatField(min_value=1.0, required=False)
 
-    def validate_radius_m(self, value):
-        return value
+    # --- Optional repeat rule ---
+    repeat = serializers.ChoiceField(
+        choices=Repeat.choices, required=False, default=Repeat.NONE
+    )
+    repeat_interval = serializers.IntegerField(
+        min_value=1, max_value=12, required=False, default=1,
+        help_text="Every N days/weeks/months. 2 with weekly means fortnightly.",
+    )
+    repeat_count = serializers.IntegerField(
+        min_value=1, max_value=60, required=False,
+        help_text="How many occurrences in total, including the first.",
+    )
+    repeat_until = serializers.DateField(
+        required=False, help_text="Stop on or before this date."
+    )
 
     def validate(self, attrs):
         attrs = super().validate(attrs)
         attrs.setdefault("radius_m", settings.DEFAULT_SESSION_RADIUS_M)
+
+        if attrs.get("repeat", Repeat.NONE) != Repeat.NONE:
+            if not attrs.get("repeat_count") and not attrs.get("repeat_until"):
+                raise serializers.ValidationError(
+                    {"repeat_count": "Give repeat_count or repeat_until for a "
+                                     "repeating session."}
+                )
+            until = attrs.get("repeat_until")
+            if until and until < attrs["date"]:
+                raise serializers.ValidationError(
+                    {"repeat_until": "repeat_until cannot be before the first date."}
+                )
         return attrs
 
 
@@ -181,6 +223,26 @@ class ManualAttendanceSerializer(SessionSlotSerializer):
         if not User.objects.filter(username=value, role=Role.STUDENT).exists():
             raise serializers.ValidationError("No student with that username.")
         return value
+
+
+class StudentAttendanceSerializer(serializers.Serializer):
+    """One row of a teacher's per-student dashboard."""
+
+    username = serializers.CharField()
+    name = serializers.CharField()
+    email = serializers.EmailField()
+    attended = serializers.IntegerField()
+    total_sessions = serializers.IntegerField()
+    attendance_pct = serializers.FloatField()
+    manual_count = serializers.IntegerField()
+    last_seen = serializers.DateField(allow_null=True)
+    face_enrolled = serializers.BooleanField()
+
+
+class ArchiveCourseSerializer(CourseNameSerializer):
+    archived = serializers.BooleanField(
+        help_text="true archives the course, false restores it."
+    )
 
 
 class UsernameAvailabilitySerializer(serializers.Serializer):

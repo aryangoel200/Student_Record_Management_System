@@ -1,4 +1,5 @@
 import logging
+from uuid import uuid4
 
 from django.conf import settings
 from django.db import IntegrityError, transaction
@@ -39,9 +40,11 @@ from .models import (
     AttendanceRecord,
     Course,
     Enrollment,
+    Repeat,
     Session,
     generate_verification_code,
 )
+from .recurrence import expand
 from .selectors import (
     get_course,
     get_course_by_code,
@@ -50,6 +53,7 @@ from .selectors import (
     get_visible_course,
 )
 from .serializers import (
+    ArchiveCourseSerializer,
     AttendanceRecordSerializer,
     CourseCreateSerializer,
     CourseNameSerializer,
@@ -61,6 +65,7 @@ from .serializers import (
     SessionCreateSerializer,
     SessionSerializer,
     SessionSlotSerializer,
+    StudentAttendanceSerializer,
     StudentSerializer,
     UsernameAvailabilitySerializer,
 )
@@ -72,6 +77,14 @@ def _validated(serializer_class, request):
     serializer = serializer_class(data=request.data)
     serializer.is_valid(raise_exception=True)
     return serializer.validated_data
+
+
+def _wants_archived(request):
+    """Whether the caller asked to see archived courses too."""
+    raw = request.data.get("include_archived") or request.query_params.get(
+        "include_archived"
+    )
+    return str(raw).strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _present_session_ids(user, course):
@@ -122,6 +135,10 @@ def show_created(request):
     queryset = Course.objects.select_related("teacher").annotate(
         enrolled_count=Count("enrollments", distinct=True)
     )
+    # Archived courses are hidden unless asked for, so a teacher's list stays
+    # about what they are currently teaching.
+    if not _wants_archived(request):
+        queryset = queryset.filter(archived_at__isnull=True)
     if request.user.is_admin:
         teacher_username = request.data.get("teacher")
         if teacher_username:
@@ -141,6 +158,8 @@ def show_enrolled(request):
         .select_related("teacher")
         .distinct()
     )
+    if not _wants_archived(request):
+        queryset = queryset.filter(archived_at__isnull=True)
     return Response(EnrolledCourseSerializer(queryset, many=True).data)
 
 
@@ -233,25 +252,89 @@ def course_stats(request):
 @api_view(["POST"])
 @permission_classes([IsTeacherOrAdmin])
 def create_new_session(request):
+    """Create one session, or a whole recurring series.
+
+    Occurrences are written as individual rows sharing a `series_id`. Slots that
+    already exist are skipped rather than failing the request, so extending a
+    series over dates that partly overlap an existing one is not an error.
+    """
     data = _validated(SessionCreateSerializer, request)
     course = get_managed_course(request.user, data["course_name"])
-    try:
-        with transaction.atomic():
-            session = Session.objects.create(
-                course=course,
-                date=data["date"],
-                start_time=data["start_time"],
-                end_time=data["end_time"],
-                lat=data["lat"],
-                lon=data["lon"],
-                radius_m=data["radius_m"],
-            )
-    except IntegrityError:
+
+    if course.is_archived:
         return Response(
-            {"detail": "A session already exists for that course and time slot."},
+            {"detail": f"{course.name} is archived. Restore it to add sessions."},
             status=status.HTTP_409_CONFLICT,
         )
-    return Response(SessionSerializer(session).data, status=status.HTTP_201_CREATED)
+
+    repeat = data.get("repeat", Repeat.NONE)
+    dates = expand(
+        start=data["date"],
+        repeat=repeat,
+        interval=data.get("repeat_interval", 1),
+        count=data.get("repeat_count", 1),
+        until=data.get("repeat_until"),
+    )
+    series_id = uuid4() if repeat != Repeat.NONE else None
+
+    created, skipped = [], []
+    for occurrence in dates:
+        try:
+            with transaction.atomic():
+                created.append(
+                    Session.objects.create(
+                        course=course,
+                        date=occurrence,
+                        start_time=data["start_time"],
+                        end_time=data["end_time"],
+                        lat=data["lat"],
+                        lon=data["lon"],
+                        radius_m=data["radius_m"],
+                        repeat=repeat,
+                        series_id=series_id,
+                    )
+                )
+        except IntegrityError:
+            skipped.append(occurrence)
+
+    if not created:
+        return Response(
+            {"detail": "A session already exists for every date in that series."},
+            status=status.HTTP_409_CONFLICT,
+        )
+
+    payload = {
+        "created": SessionSerializer(created, many=True).data,
+        "skipped": [str(d) for d in skipped],
+        "series_id": str(series_id) if series_id else None,
+    }
+    if skipped:
+        payload["detail"] = (
+            f"Created {len(created)} session(s); {len(skipped)} already existed."
+        )
+    return Response(payload, status=status.HTTP_201_CREATED)
+
+
+@api_view(["POST"])
+@permission_classes([IsTeacherOrAdmin])
+def delete_session_series(request):
+    """Remove every remaining occurrence that shares a series_id."""
+    series_id = request.data.get("series_id")
+    if not series_id:
+        return Response(
+            {"detail": "series_id is required."}, status=status.HTTP_400_BAD_REQUEST
+        )
+
+    sessions = Session.objects.filter(series_id=series_id).select_related("course")
+    first = sessions.first()
+    if first is None:
+        return Response({"detail": "No such series."}, status=status.HTTP_404_NOT_FOUND)
+
+    # Ownership is checked on the course the series belongs to.
+    get_managed_course(request.user, first.course.name)
+    deleted = sessions.count()
+    sessions.delete()
+    return Response({"detail": f"Deleted {deleted} session(s)."})
 
 
 @api_view(["POST"])
@@ -604,6 +687,160 @@ def unmark_attendance(request):
         session,
     )
     return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+# --- Today -----------------------------------------------------------------
+
+
+@api_view(["GET", "POST"])
+@permission_classes([IsAuthenticated])
+def today(request):
+    """Everything happening today, across every course the caller is part of.
+
+    Ordered by start time, with the live one first, so a client can render a
+    single chronological agenda instead of making the user open each course.
+    """
+    now = timezone.localtime()
+    user = request.user
+
+    if user.is_teacher or user.is_admin:
+        courses = Course.objects.filter(archived_at__isnull=True)
+        if not user.is_admin:
+            courses = courses.filter(teacher=user)
+    else:
+        courses = Course.objects.filter(
+            enrollments__student=user, archived_at__isnull=True
+        )
+
+    sessions = list(
+        Session.objects.filter(course__in=courses, date=now.date())
+        .select_related("course", "course__teacher")
+        .annotate(present_count=Count("attendance_records", distinct=True))
+        .order_by("start_time", "end_time")
+    )
+
+    present_ids = set(
+        AttendanceRecord.objects.filter(
+            student=user, session__in=sessions
+        ).values_list("session_id", flat=True)
+    )
+
+    serialized = SessionSerializer(
+        sessions, many=True, context={"present_session_ids": present_ids}
+    ).data
+
+    # Live first, then upcoming, then finished — each group already in time
+    # order from the query above.
+    def bucket(item, session):
+        if session.is_open(now):
+            return 0
+        return 1 if session.start_time > now.time() else 2
+
+    ordered = [
+        payload
+        for _, payload in sorted(
+            (
+                (bucket(payload, session), payload)
+                for payload, session in zip(serialized, sessions)
+            ),
+            key=lambda pair: pair[0],
+        )
+    ]
+
+    return Response(
+        {
+            "date": str(now.date()),
+            "now": now.strftime("%H:%M:%S"),
+            "open_count": sum(1 for s in sessions if s.is_open(now)),
+            "sessions": ordered,
+        }
+    )
+
+
+# --- Archiving -------------------------------------------------------------
+
+
+@api_view(["POST"])
+@permission_classes([IsTeacherOrAdmin])
+def archive_course(request):
+    """Archive or restore a course. Nothing is deleted either way."""
+    data = _validated(ArchiveCourseSerializer, request)
+    course = get_managed_course(request.user, data["course_name"])
+
+    if data["archived"]:
+        course.archive()
+        detail = f"{course.name} archived."
+    else:
+        course.unarchive()
+        detail = f"{course.name} restored."
+
+    logger.info("%s: %s", request.user.username, detail)
+    return Response({"detail": detail, "course": CourseSerializer(course).data})
+
+
+# --- Teacher dashboard ------------------------------------------------------
+
+
+@api_view(["POST"])
+@permission_classes([IsTeacherOrAdmin])
+def course_student_stats(request):
+    """Per-student attendance for one course.
+
+    One query for sessions and one for records, then aggregated in Python —
+    rosters are class-sized, and this keeps the shape obvious.
+    """
+    data = _validated(CourseNameSerializer, request)
+    course = get_managed_course(request.user, data["course_name"])
+
+    session_ids = list(course.sessions.values_list("id", flat=True))
+    total = len(session_ids)
+
+    records = AttendanceRecord.objects.filter(
+        session_id__in=session_ids
+    ).select_related("student", "session")
+
+    tally = {}
+    for record in records:
+        entry = tally.setdefault(
+            record.student_id, {"attended": 0, "manual": 0, "last_seen": None}
+        )
+        entry["attended"] += 1
+        if record.method == AttendanceRecord.Method.MANUAL:
+            entry["manual"] += 1
+        seen = record.session.date
+        if entry["last_seen"] is None or seen > entry["last_seen"]:
+            entry["last_seen"] = seen
+
+    rows = []
+    students = User.objects.filter(enrollments__course=course).order_by("username")
+    for student in students:
+        entry = tally.get(student.pk, {"attended": 0, "manual": 0, "last_seen": None})
+        rows.append(
+            {
+                "username": student.username,
+                "name": student.name,
+                "email": student.email,
+                "attended": entry["attended"],
+                "total_sessions": total,
+                "attendance_pct": (
+                    round(100 * entry["attended"] / total, 1) if total else 0.0
+                ),
+                "manual_count": entry["manual"],
+                "last_seen": entry["last_seen"],
+                "face_enrolled": student.face_enrolled,
+            }
+        )
+
+    # Lowest attendance first: the students a teacher needs to notice.
+    rows.sort(key=lambda row: (row["attendance_pct"], row["username"]))
+
+    return Response(
+        {
+            "course_name": course.name,
+            "total_sessions": total,
+            "students": StudentAttendanceSerializer(rows, many=True).data,
+        }
+    )
 
 
 # --- Public ----------------------------------------------------------------

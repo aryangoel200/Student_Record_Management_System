@@ -41,12 +41,34 @@ class Course(models.Model):
         blank=True,
     )
     created_at = models.DateTimeField(auto_now_add=True)
+    archived_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        db_index=True,
+        help_text="Set when the course is archived. Archiving hides it from the "
+        "active lists and blocks new sessions; nothing is deleted, so past "
+        "attendance stays intact and auditable.",
+    )
 
     class Meta:
         ordering = ["name"]
 
     def __str__(self):
         return self.name
+
+    @property
+    def is_archived(self):
+        return self.archived_at is not None
+
+    def archive(self):
+        if self.archived_at is None:
+            self.archived_at = timezone.now()
+            self.save(update_fields=["archived_at"])
+
+    def unarchive(self):
+        if self.archived_at is not None:
+            self.archived_at = None
+            self.save(update_fields=["archived_at"])
 
     @transaction.atomic
     def rotate_verification_code(self):
@@ -76,6 +98,21 @@ class Enrollment(models.Model):
         return f"{self.student.username} in {self.course.name}"
 
 
+class Repeat(models.TextChoices):
+    """How a scheduled session repeats.
+
+    Occurrences are written out as individual Session rows rather than being
+    derived from this rule at read time, so every existing query, the geofence
+    and per-occurrence deletion keep working untouched. The rule is recorded
+    only so a series can be described back to the teacher.
+    """
+
+    NONE = "none", "Does not repeat"
+    DAILY = "daily", "Daily"
+    WEEKLY = "weekly", "Weekly"
+    MONTHLY = "monthly", "Monthly"
+
+
 class Session(models.Model):
     """A single class meeting students can mark attendance against."""
 
@@ -97,6 +134,13 @@ class Session(models.Model):
         help_text="Geofence radius in metres.",
     )
     created_at = models.DateTimeField(auto_now_add=True)
+
+    # Occurrences created together share this, so a whole series can be listed
+    # or removed without guessing which rows belonged to it.
+    series_id = models.UUIDField(null=True, blank=True, db_index=True)
+    repeat = models.CharField(
+        max_length=16, choices=Repeat.choices, default=Repeat.NONE
+    )
 
     class Meta:
         constraints = [
