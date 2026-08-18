@@ -1,16 +1,31 @@
 import logging
 
+from django.conf import settings
 from django.db import IntegrityError, transaction
 from django.db.models import Count
 from django.utils import timezone
 from rest_framework import status
-from rest_framework.decorators import api_view, permission_classes, throttle_classes
+from rest_framework.decorators import (
+    api_view,
+    parser_classes,
+    permission_classes,
+    throttle_classes,
+)
+from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.throttling import ScopedRateThrottle
 
 from Auth.models import Role, User
 from common.geo import haversine_metres
+from common.integrity import (
+    DeviceIntegrityUnavailable,
+    consume_nonce,
+    get_integrity_verifier,
+    integrity_required,
+    issue_nonce,
+    nonce_ttl_seconds,
+)
 from common.permissions import IsStudent, IsTeacherOrAdmin
 from Face_Recognation.http import face_error_response
 from Face_Recognation.models import FaceEnrollment
@@ -295,9 +310,66 @@ def delete_session(request):
 # --- Attendance ------------------------------------------------------------
 
 
+def _check_device_integrity(user, data):
+    """Verify the Play Integrity token. Returns a Response on failure, else None."""
+    token = (data.get("integrity_token") or "").strip()
+    nonce = (data.get("integrity_nonce") or "").strip()
+
+    if not token or not nonce:
+        return Response(
+            {
+                "detail": "This server requires a device integrity token. Request "
+                "a challenge from Home/attendance/challenge first."
+            },
+            status=status.HTTP_428_PRECONDITION_REQUIRED,
+        )
+
+    # Burn the nonce before verifying: single-use means single-use whatever the
+    # verdict turns out to be, otherwise a failed attempt leaves it replayable.
+    if not consume_nonce(user, nonce):
+        return Response(
+            {"detail": "Integrity challenge is unknown, expired, or already used."},
+            status=status.HTTP_403_FORBIDDEN,
+        )
+
+    try:
+        verdict = get_integrity_verifier().verify(token, nonce)
+    except DeviceIntegrityUnavailable as exc:
+        logger.error("Device integrity check unavailable: %s", exc)
+        return Response(
+            {"detail": str(exc)}, status=status.HTTP_503_SERVICE_UNAVAILABLE
+        )
+
+    if not verdict.ok:
+        logger.warning(
+            "Device integrity failed for %s: %s", user.username, verdict.reason
+        )
+        return Response({"detail": verdict.reason}, status=status.HTTP_403_FORBIDDEN)
+    return None
+
+
+@api_view(["POST"])
+@permission_classes([IsStudent])
+def attendance_challenge(request):
+    """Issue a single-use nonce to bind a Play Integrity token to this attempt.
+
+    Always available, so the client can follow one flow regardless of how the
+    server is configured; `integrity_required` tells the app whether it actually
+    needs to go and fetch a token.
+    """
+    return Response(
+        {
+            "nonce": issue_nonce(request.user),
+            "expires_in": nonce_ttl_seconds(),
+            "integrity_required": integrity_required(),
+        }
+    )
+
+
 @api_view(["POST"])
 @permission_classes([IsStudent])
 @throttle_classes([ScopedRateThrottle])
+@parser_classes([MultiPartParser, FormParser, JSONParser])
 def mark_attendance(request):
     """A student marks themselves present.
 
@@ -307,11 +379,16 @@ def mark_attendance(request):
       1. the caller is the student being marked  (identity from the JWT)
       2. they are enrolled in the course
       3. the session is open right now
-      4. their reported position is inside the session's geofence
-      5. the captured frame matches their enrolled face
+      4. the position is not mocked, is precise enough, and is inside the
+         session's geofence
+      5. the device passes Play Integrity  (when the server requires it)
+      6. the captured frame matches their enrolled face
 
-    Previously 4 and 5 ran in the browser and their result was passed to the
+    Previously 4 and 6 ran in the browser and their result was passed to the
     server as a claim, which made both trivially skippable.
+
+    Accepts multipart/form-data — send the frame as a JPEG file part rather than
+    a base64 data URL, which costs a third more bytes on a mobile connection.
     """
     data = _validated(MarkAttendanceSerializer, request)
 
@@ -335,7 +412,31 @@ def mark_attendance(request):
             status=status.HTTP_409_CONFLICT,
         )
 
-    # 4. Geofence — cheap, so check it before loading the face model.
+    # 4a. Platform location signals. Free to check, and they decide whether the
+    # coordinates below are worth believing at all.
+    if settings.REJECT_MOCK_LOCATION and data.get("is_mock_location"):
+        logger.warning(
+            "Attendance refused for %s: mock location provider reported",
+            request.user.username,
+        )
+        return Response(
+            {"detail": "Attendance cannot be marked from a mocked location."},
+            status=status.HTTP_403_FORBIDDEN,
+        )
+
+    accuracy_m = data.get("location_accuracy_m")
+    if accuracy_m is not None and accuracy_m > settings.MAX_LOCATION_ACCURACY_M:
+        return Response(
+            {
+                "detail": "Your location fix is too imprecise. Move outdoors or "
+                "enable high-accuracy location and try again.",
+                "accuracy_m": round(accuracy_m, 1),
+                "required_accuracy_m": settings.MAX_LOCATION_ACCURACY_M,
+            },
+            status=status.HTTP_403_FORBIDDEN,
+        )
+
+    # 4b. Geofence — cheap, so check it before loading the face model.
     distance_m = haversine_metres(
         data["lat"], data["lon"], session.lat, session.lon
     )
@@ -355,7 +456,15 @@ def mark_attendance(request):
             status=status.HTTP_403_FORBIDDEN,
         )
 
-    # 5. Face match against the stored enrolment.
+    # 5. Device attestation, if this deployment requires it. Runs before the
+    # face model because it is the cheaper of the two remaining checks, and
+    # because it is what makes the mock-location flag above trustworthy.
+    if integrity_required():
+        verdict_response = _check_device_integrity(request.user, data)
+        if verdict_response is not None:
+            return verdict_response
+
+    # 6. Face match against the stored enrolment.
     try:
         enrollment = request.user.face_enrollment
     except FaceEnrollment.DoesNotExist:

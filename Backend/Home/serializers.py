@@ -2,6 +2,7 @@ from django.conf import settings
 from rest_framework import serializers
 
 from Auth.models import Role, User
+from Face_Recognation.fields import FaceImageField
 
 from .models import AttendanceRecord, Course, Session
 
@@ -139,12 +140,35 @@ class MarkAttendanceSerializer(SessionSlotSerializer):
 
     The image and the student's real coordinates are both required and both
     checked server-side. The client is not trusted to have done either.
+
+    Accepts `multipart/form-data` (what the Android client should send) as well
+    as JSON.
     """
 
     lat = serializers.FloatField(min_value=-90.0, max_value=90.0)
     lon = serializers.FloatField(min_value=-180.0, max_value=180.0)
-    image = serializers.CharField(
-        help_text="data: URL of a captured frame, e.g. data:image/png;base64,..."
+    image = FaceImageField()
+
+    # --- Signals the Android client forwards from the platform ---
+    location_accuracy_m = serializers.FloatField(
+        required=False,
+        min_value=0.0,
+        help_text="Location.getAccuracy() — radius of 68% confidence, in metres.",
+    )
+    is_mock_location = serializers.BooleanField(
+        required=False,
+        default=False,
+        help_text="Location.isMock (API 31+) or isFromMockProvider.",
+    )
+    integrity_token = serializers.CharField(
+        required=False,
+        allow_blank=True,
+        help_text="Play Integrity token, required when DEVICE_INTEGRITY_REQUIRED is on.",
+    )
+    integrity_nonce = serializers.CharField(
+        required=False,
+        allow_blank=True,
+        help_text="The nonce from POST Home/attendance/challenge.",
     )
 
 

@@ -131,6 +131,11 @@ the dependency is missing. It is written to **fail closed**: every method raises
 `BackendUnavailable`, which becomes a 503. Turning face recognition off means
 "nobody can face-verify", never "everybody passes".
 
+`common/integrity.py` repeats the same shape for device attestation —
+`BaseIntegrityVerifier`, a `PlayIntegrityVerifier`, a fail-closed
+`DisabledIntegrityVerifier`, and one cached factory. Two optional heavyweight
+integrations, one pattern, both safe by default.
+
 `services.py` imports no Django and no DRF. Error-to-status mapping is a
 separate module, `http.py`, shared by the enrolment view and the attendance view
 so the two report identical failures identically.
@@ -193,12 +198,33 @@ writes the row:
 1. identity      the student is taken from the JWT, never the request body
 2. enrolment     they are enrolled in the course
 3. timing        the session is open right now (server clock)
-4. geofence      haversine(reported position, session) ≤ session.radius_m
-5. face          the captured frame matches their stored embedding
-6. write         INSERT, guarded by a unique constraint
+4. location      not a mock provider; fix precise enough;
+                 haversine(reported position, session) ≤ session.radius_m
+5. attestation   Play Integrity, against a single-use nonce   (when required)
+6. face          the captured frame matches their stored embedding
+7. write         INSERT, guarded by a unique constraint
 ```
 
-Ordering is deliberate: the cheap checks run before the face model is loaded.
+Ordering is deliberate: the free local checks run before the network call, which
+runs before the face model is loaded.
+
+### Trusting the position
+
+A geofence only proves *what the client said its coordinates were*. Three things
+turn that into something worth relying on:
+
+- **Mock-provider flag** — Android's `Location.isMock`, forwarded by the app.
+  Catches the fake-GPS apps behind most casual abuse.
+- **Accuracy gate** — a coarse network fix can span a whole neighbourhood, and
+  would otherwise satisfy a 100 m geofence from well outside it. Fixes vaguer
+  than `MAX_LOCATION_ACCURACY_M` are refused.
+- **Play Integrity** — Google attests the request came from a genuine,
+  unmodified build of your app on a genuine device. This is what makes the first
+  two trustworthy: without it, a patched APK simply reports `is_mock=false`.
+
+Integrity tokens are bound to a **single-use nonce** from
+`POST Home/attendance/challenge`, so a token captured once cannot be replayed
+against a later session. The nonce is burned on first use whatever the verdict.
 
 Supporting decisions:
 
@@ -299,20 +325,31 @@ return a bare array.
 | POST | `Home/attendance/manual` | owner, admin | Teacher override |
 | POST/DELETE | `Home/attendance/remove` | owner, admin | Remove a record |
 
-`POST Home/attendance` expects the session slot, the student's **real**
-coordinates, and a captured frame:
+| POST | `Home/attendance/challenge` | student | Nonce for a Play Integrity token |
 
-```json
-{
-  "course_name": "CS210",
-  "date": "2026-03-10",
-  "start_time": "10:00",
-  "end_time": "11:00",
-  "lat": 15.3925,
-  "lon": 73.8785,
-  "image": "data:image/png;base64,..."
-}
+#### Marking attendance
+
+`POST Home/attendance` takes `multipart/form-data` — send the frame as a JPEG
+file part. Base64 costs a third more bytes, which matters on a student's data
+plan. JSON with a `data:` URL still works for testing.
+
+```bash
+curl -X POST $API/Home/attendance -H "Authorization: Bearer $TOKEN" \
+  -F course_name=CS210 -F date=2026-03-10 \
+  -F start_time=10:00 -F end_time=11:00 \
+  -F lat=15.3925 -F lon=73.8785 \
+  -F location_accuracy_m=8.4 -F is_mock_location=false \
+  -F "image=@frame.jpg;type=image/jpeg"
 ```
+
+| Field | Required | Source on Android |
+|---|---|---|
+| `course_name`, `date`, `start_time`, `end_time` | ✅ | The session being marked |
+| `lat`, `lon` | ✅ | `FusedLocationProviderClient` |
+| `image` | ✅ | CameraX capture, JPEG ~720p |
+| `location_accuracy_m` | optional | `Location.getAccuracy()` |
+| `is_mock_location` | optional | `Location.isMock` (API 31+) |
+| `integrity_token`, `integrity_nonce` | when required | Play Integrity + `attendance/challenge` |
 
 Times are parsed, so `"10:00"` and `"10:00:00"` identify the same session.
 
@@ -321,11 +358,11 @@ Failure statuses, all with a `detail` string:
 | Status | Meaning |
 |---|---|
 | 400 | Missing or malformed field, or an undecodable image |
-| 403 | Not enrolled, outside the geofence, or the face did not match |
+| 403 | Not enrolled, mocked location, imprecise fix, outside the geofence, failed attestation, or the face did not match |
 | 409 | Session not open, or already marked |
 | 422 | No face, or several faces, in the frame |
-| 428 | No face enrolled yet — enrol first |
-| 503 | Face recognition unavailable on this server |
+| 428 | No face enrolled, or an integrity token is required and absent |
+| 503 | Face recognition or integrity checking unavailable on this server |
 
 ### Face
 
@@ -374,7 +411,14 @@ Set in `Backend/.env` — see `.env.example` for the annotated list.
 | `FACE_RECOGNITION_MODEL` | `Facenet512` | DeepFace model |
 | `FACE_DETECTOR_BACKEND` | `opencv` | DeepFace detector |
 | `FACE_MATCH_THRESHOLD` | `0.30` | Max cosine distance; lower is stricter |
+| `MAX_FACE_IMAGE_BYTES` | `8388608` | Largest accepted frame |
 | `DEFAULT_SESSION_RADIUS_M` | `100` | Geofence radius for new sessions |
+| `REJECT_MOCK_LOCATION` | `true` | Refuse fixes from a mock provider |
+| `MAX_LOCATION_ACCURACY_M` | `100` | Refuse fixes vaguer than this |
+| `DEVICE_INTEGRITY_REQUIRED` | `false` | Opt in to Play Integrity; fails closed once on |
+| `ANDROID_PACKAGE_NAME` | — | Required when integrity is on |
+| `PLAY_INTEGRITY_CREDENTIALS` | — | Service-account JSON key path |
+| `INTEGRITY_NONCE_TTL_SECONDS` | `300` | Challenge lifetime |
 
 Tuning the match threshold: `0.30` is DeepFace's published default for
 Facenet512 with cosine distance. Lower it to reject more aggressively; raise it
@@ -390,10 +434,11 @@ python manage.py test              # whole suite
 python manage.py test Home         # one app
 ```
 
-78 tests covering the role matrix, course ownership, and the attendance rules —
-geofence, session window, duplicate marking, face mismatch, missing enrolment,
-and the disabled backend. The face model is stubbed, so the suite runs in about
-30 seconds without the TensorFlow install.
+102 tests covering the role matrix, course ownership, the attendance rules
+(geofence, session window, duplicate marking, face mismatch, missing enrolment,
+disabled backend), multipart upload, and the device-integrity flow including
+nonce replay. The face model and the integrity verifier are both stubbed, so the
+suite runs in under a minute with only `requirements.txt` installed.
 
 The tests are written to pin down behaviour that the earlier implementation got
 wrong, and are named accordingly:
@@ -429,12 +474,16 @@ depends on when the suite happens to run.
 | Course codes | `chr(random.randint(50,100))` × 5, no uniqueness check | 8 chars from `secrets`, collision-checked, unambiguous alphabet |
 | Tokens | 15-day access token, no revocation | 30-min access, rotating refresh, blacklist on logout |
 | Secrets | Key, DB password, `DEBUG=True` committed | Environment variables; `.gitignore` added |
-| Tests | Four empty `tests.py` stubs | 78 tests |
+| Tests | Four empty `tests.py` stubs | 102 tests |
 
 ### Known gaps
 
 - **DeepFace has not been exercised end to end.** The tests stub the backend
   out. The integration path — import, weight download, embed — is unverified.
+- **Play Integrity has not been tested against live Google infrastructure.** The
+  policy around it — nonce issue, single use, replay rejection, fail-closed
+  behaviour, verdict handling — is fully tested against a stub verifier. The
+  literal `decodeIntegrityToken` call in `PlayIntegrityVerifier` is not.
 - **The `.npy` face encodings remain in git history.** They are untracked now,
   but purging them from past commits requires a history rewrite.
 - **The frontend is only partly migrated.** The axios client and auth hooks are

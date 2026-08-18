@@ -22,6 +22,11 @@ urlpatterns = [
     ),
     path("delete_session", views.delete_session, name="delete_session"),
     # Attendance
+    path(
+        "attendance/challenge",
+        views.attendance_challenge,
+        name="attendance_challenge",
+    ),
     path("attendance", views.mark_attendance, name="mark_attendance"),
     path(
         "attendance/manual",

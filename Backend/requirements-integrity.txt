@@ -1,0 +1,13 @@
+# Optional: Google Play Integrity verification for the Android client.
+#
+#     pip install -r requirements.txt -r requirements-integrity.txt
+#
+# Only needed when DEVICE_INTEGRITY_REQUIRED=true. You also need a Play Console
+# app and a service account with the Play Integrity API enabled; point
+# PLAY_INTEGRITY_CREDENTIALS at its JSON key file.
+#
+# Without this, DEVICE_INTEGRITY_REQUIRED=true makes attendance return 503 —
+# it fails closed rather than skipping the check.
+
+google-api-python-client==2.149.0
+google-auth==2.35.0
