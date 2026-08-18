@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Colours come from the Compose theme; this only styles the window
+         before the first frame is drawn. -->
+    <style name="Theme.Attendance" parent="android:Theme.Material.Light.NoActionBar" />
+</resources>
