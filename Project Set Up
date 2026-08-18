@@ -1,9 +1,78 @@
 Setting Up the Project
+======================
 
--- Install Django
--- Install React
+Backend (Django + SQLite)
+-------------------------
 
--- Install cmake,dlib, face_recognition using pip
+Python 3.10-3.12. Use 3.12 if you want face recognition: TensorFlow has no
+3.13 wheels yet.
 
--- Install corsheaders and other missing libraries (if getting utils.six error try updating Django and then try again)
+    cd Backend
+    python3.12 -m venv .venv
+    source .venv/bin/activate
+    pip install -r requirements.txt
 
+    cp .env.example .env          # then edit it
+    python manage.py migrate
+    python manage.py createsuperuser   # this account gets the "admin" role
+    python manage.py runserver
+
+No MySQL, no cmake, and no dlib compile any more. The database is a SQLite file
+at Backend/db.sqlite3 (override with DJANGO_DB_PATH).
+
+Face recognition (optional)
+---------------------------
+
+The face stack is a separate install because it is a large download (~500 MB)
+and takes a while to pull the model weights on first use:
+
+    pip install -r requirements-face.txt
+
+Then set FACE_RECOGNITION_ENABLED=true in Backend/.env.
+
+With it disabled, the server runs fine and the face endpoints return HTTP 503.
+They deliberately refuse rather than waving attendance through — turning face
+recognition off must never mean "everyone passes".
+
+To use a different library, add a backend class to
+Face_Recognation/services.py. Nothing outside that file needs to change.
+
+Roles
+-----
+
+Three roles: student, teacher, admin.
+
+  - Public signup always creates a student. The role is never taken from the
+    request body.
+  - createsuperuser creates an admin.
+  - An admin promotes people, either in the Django admin at /admin/ or with:
+
+        PATCH /api/Auth/users/<username>/role   {"role": "teacher"}
+
+  - Students must enrol a face (POST /api/Face_Recog/register_image) before
+    they can mark attendance.
+
+Running the tests
+-----------------
+
+    cd Backend
+    python manage.py test
+
+These cover the role matrix, course ownership, and the attendance rules
+(geofence, session window, duplicate marking, face match). They stub the face
+model out, so they run without the TensorFlow install.
+
+Frontend (React)
+----------------
+
+    cd frontend
+    npm install
+    npm start
+
+Copy frontend/.env.example to frontend/.env if the API is not on
+http://127.0.0.1:8000/api/.
+
+NOTE: the frontend has not been migrated to the reworked API yet. The axios
+client and the auth hooks are updated; the components still expect the old
+request/response shapes, so the app will not work end to end until they are
+brought across.

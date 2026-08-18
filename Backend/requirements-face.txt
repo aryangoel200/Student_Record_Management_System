@@ -1,0 +1,16 @@
+# Optional face-recognition stack. Install on top of requirements.txt:
+#
+#     pip install -r requirements.txt -r requirements-face.txt
+#
+# This replaces the old face_recognition + dlib + cmake combination, which had
+# to compile dlib from source. DeepFace ships pure-Python and pulls prebuilt
+# TensorFlow wheels, so there is no build step — but it is a large download
+# (~500 MB) and downloads model weights on first use.
+#
+# To swap in a lighter backend (e.g. InsightFace + onnxruntime), add a class to
+# Face_Recognation/services.py; nothing else in the codebase needs to change.
+
+deepface==0.0.93
+tensorflow==2.16.2
+tf-keras==2.16.0
+opencv-python-headless==4.10.0.84

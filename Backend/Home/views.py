@@ -1,916 +1,508 @@
-import random
+import logging
 
-from datetime import datetime
-
-import simplejson as json
-
-from rest_framework.decorators import api_view, action
-from rest_framework.parsers import FormParser, MultiPartParser, JSONParser
+from django.db import IntegrityError, transaction
+from django.db.models import Count
+from django.utils import timezone
+from rest_framework import status
+from rest_framework.decorators import api_view, permission_classes, throttle_classes
+from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
-from rest_framework import status, viewsets
-from rest_framework.views import APIView
-from .serializers import Session_Record_Table_Serializers, Course_Table_Serializers, Person_Table_Serializers, \
-    Attendance_Record_Table_Serializers, Regisatration_Image_Serializer,Admin_Table_Serializers
-from django.contrib.auth import authenticate
+from rest_framework.throttling import ScopedRateThrottle
 
-from rest_framework_simplejwt.tokens import RefreshToken
-from rest_framework.permissions import IsAuthenticated
-from .models import person_table, course_table, session_record_table, attendance_record_table,admin_table
+from Auth.models import Role, User
+from common.geo import haversine_metres
+from common.permissions import IsStudent, IsTeacherOrAdmin
+from Face_Recognation.http import face_error_response
+from Face_Recognation.models import FaceEnrollment
+from Face_Recognation.services import (
+    FaceRecognitionError,
+    decode_image,
+    get_face_backend,
+)
+
+from .models import (
+    AttendanceRecord,
+    Course,
+    Enrollment,
+    Session,
+    generate_verification_code,
+)
+from .selectors import (
+    get_course,
+    get_course_by_code,
+    get_managed_course,
+    get_session,
+    get_visible_course,
+)
+from .serializers import (
+    AttendanceRecordSerializer,
+    CourseCreateSerializer,
+    CourseNameSerializer,
+    CourseRegistrationSerializer,
+    CourseSerializer,
+    EnrolledCourseSerializer,
+    ManualAttendanceSerializer,
+    MarkAttendanceSerializer,
+    SessionCreateSerializer,
+    SessionSerializer,
+    SessionSlotSerializer,
+    StudentSerializer,
+    UsernameAvailabilitySerializer,
+)
+
+logger = logging.getLogger(__name__)
 
 
-# @api_view(['POST'])
-# def create_new_course(request):
-#     code = ""
-#     for i in range(0, 10):
-#         code = code + chr(random.randint(50, 100))
-
-#     request.data['verification_code'] = code
-#     print(request.data)
-#     serializer = Course_Table_Serializers(data=request.data)
-#     if serializer.is_valid(raise_exception=True):
-#         serializer.save()
-#         person = person_table.objects.get(rollNumber=request.data["teacher"])
-#         course = course_table.objects.filter(verification_code=code)
-#         courseId = course.values('id')[0]['id']
-
-#         jsonDec = json.decoder.JSONDecoder()
-#         course_records = jsonDec.decode(person.course_list_created)
-#         course_records.append(courseId)
-#         print(course_records)
-#         person.course_list_created = json.dumps(course_records)
-#         person.save()
-
-#         person_serializer = Person_Table_Serializers(person)  # Serialize the person object
-
-#         course_data = course_table.objects.filter(id__in=course_records)  # Get course data
-#         course_serializer = Course_Table_Serializers(course_data, many=True)  # Serialize the course data
-
-#         return Response({
-#             "message": f"Created New Course {request.data['name']}",
-#             "Code": f"{code}",
-#             "person": person_serializer.data,
-#             "course_data": course_serializer.data  # Include serialized course data in the response
-#         }, status=status.HTTP_200_OK)
+def _validated(serializer_class, request):
+    serializer = serializer_class(data=request.data)
+    serializer.is_valid(raise_exception=True)
+    return serializer.validated_data
 
 
+def _present_session_ids(user, course):
+    return set(
+        AttendanceRecord.objects.filter(
+            student=user, session__course=course
+        ).values_list("session_id", flat=True)
+    )
 
-###################################################################################################
-@api_view(['POST'])
+
+# --- Courses ---------------------------------------------------------------
+
+
+@api_view(["POST"])
+@permission_classes([IsTeacherOrAdmin])
 def create_new_course(request):
-
-    #checking if the same course name is already taken
-    courses_existing=course_table.objects.filter(name=request.data['name'])
-    print(courses_existing)
-    if(len(list(courses_existing))!=0):
-         return Response({'msg': 'Course Name already taken'},
-                            status=status.HTTP_200_OK) 
-    # print(request.data)
-
-    #generating code for the course
-    code = ""
-    for i in range(0, 5):
-        code = code + chr(random.randint(50, 100))
-
-    request.data['verification_code'] = code
-
-    #saving the serializer
-    serializer = Course_Table_Serializers(data=request.data)
-    if serializer.is_valid(raise_exception=True):
-        serializer.save(verification_code=code, students_list=json.dumps([]), name=request.data['name'],teacher=request.data['teacher'])
-    else:
-        return Response({"msg": "Invalid Serializer: Failed to create course"}, status=status.HTTP_200_OK) 
-    
-
-    #creating entry in the database
-    jsonDec = json.decoder.JSONDecoder()
-    ins=course_table(name=request.data['name'], verification_code=str(code),teacher=request.data['teacher'],students_list=json.dumps([]))
-    ins.save()
-
-    #adding the course id to person's created list
-    person = person_table.objects.get(rollNumber=request.data["teacher"])
-
-
-    course = course_table.objects.filter(verification_code=code)
-    courseId = course.values('id')[0]['id']
-
-    course_records = jsonDec.decode(person.course_list_created)
-    course_records.append(courseId)
-    # print(course_records)
-    person.course_list_created = json.dumps(course_records)
-    person.save()
-
-    person_serializer = Person_Table_Serializers(person)  # Serialize the person object
-
-    # course_data = course_table.objects.filter(id__in=course_records)  # Get course data
-    course_serializer = Course_Table_Serializers(course)  # Serialize the course data
-
-    return Response({
-        "message": f"Created New Course {request.data['name']}",
-        "Code": f"{code}",
-        # "person": person_serializer.data,
-        # "course_data": course_serializer.data # Include serialized course data in the response
-    }, status=status.HTTP_200_OK)
-
-
-####################################################################################################    
-
-@api_view(['POST'])
-def create_new_session(request):
-
-    #checking if the same session is already taken
-    session_existing=session_record_table.objects.filter(course_name=request.data['course_name'], 
-                                                         date=request.data['date'], 
-                                                         start_time=request.data['start_time'],
-                                                         end_time=request.data['end_time'],
-                                                         lat=request.data['lat'],
-                                                         lon=request.data['lon'])
-    
-    print("Latitude="+str(request.data['lat'])+" Longitude="+str(request.data['lon']))
-    if(len(list(session_existing))!=0):
-         return Response({'msg': 'Session Already exists'},
-                            status=status.HTTP_200_OK) 
-
-    #saving the serializer
-    serializer = Session_Record_Table_Serializers(data=request.data)
-    if serializer.is_valid(raise_exception=False):
-        serializer.save(course_name=request.data['course_name'], 
-                        date=request.data['date'], 
-                        start_time=request.data['start_time'],
-                        end_time=request.data['end_time'],
-                        lat=request.data['lat'],
-                        lon=request.data['lon'])
-
-        # #creating entry in the 
-        # ins=session_record_table(course_name=request.data['course_name'], date=request.data['date'] ,start_time=request.data['start_time'],end_time=request.data['end_time'],lat=request.data['lat'],lon=request.data['lon'])
-        # ins.save()
-
-        return Response({
-            "message": f"Created the requested session",
-        }, status=status.HTTP_200_OK)
-    
-    return Response({'msg': 'Failed to create session'},
-                            status=status.HTTP_200_OK) 
-    # session_id = session_record_table.objects.filter(
-    #     course_name=course_name, date=date, start_time=start_time, end_time=end_time, location=location).values(
-    #     "id")[0]["id"]
-
-    # print(session_id)
-
-    # course = course_table.objects.get(name=course_name)
-    # if not (course):
-    #     return Response(status=status.HTTP_200_OK)
-    # jsonDec = json.decoder.JSONDecoder()
-    # session_records = jsonDec.decode(course.sessions_list)
-    # session_records.append(session_id)
-
-    # course.sessions_list = json.dumps(session_records)
-    # course.save()
-
-
-
-
-
-####################################################################################################################
-
-@api_view(['POST'])
-def new_student(request):
-    print(request.data)
-    people=person_table.objects.filter(rollNumber=request.data['rollNumber'])
-
-    serializer = Person_Table_Serializers(data=request.data)
-    if serializer.is_valid(raise_exception=True):
-        serializer.save(courses_list=json.dumps([]),course_list_created=json.dumps([]))
-    return Response(status=status.HTTP_200_OK)
-
-
-@api_view(['POST'])
-def username_availability(request):
-    people=person_table.objects.filter(rollNumber=request.data['rollNumber'])
-    if(len(people)!=0):
-        print("Hello")
-        return Response({'msg': 'Username already taken'},status=status.HTTP_200_OK)   
-    return Response({'msg': 'Username available'},status=status.HTTP_200_OK)
-
-
-
-@api_view(["POST"])
-def mark_attendance(request):
-    serializer = Attendance_Record_Table_Serializers(data=request.data)
-    if serializer.is_valid():
-        try:
-            #Checking if the person is actually registered for the course or not 
-            person=person_table.objects.filter(rollNumber=request.data['student_Id']).first()
-            jsonDec = json.decoder.JSONDecoder()
-            courses_enrolled=jsonDec.decode(person.courses_list)
-            course=course_table.objects.filter(name=request.data['course_name']).first()
-            if(course.id not in courses_enrolled):
-                return Response({'msg': 'Person is not enrolled in the course.'}, status=status.HTTP_201_CREATED)
-
-            
-            session=session_record_table.objects.filter(course_name=request.data['course_name'],date=request.data['date'],lat=request.data['lat'],lon=request.data['lon'],start_time=request.data['start_time'],end_time=request.data['end_time']).first()
-            print("Session id=",session.id)
-            ins = attendance_record_table(student_Id=request.data['student_Id'], session=session.id)
-            ins.save()
-            return Response({'msg': 'Attendance marked successfully.'}, status=status.HTTP_201_CREATED)
-        except course_table.DoesNotExist:
-            return Response({'msg': 'Course not found.'}, status=status.HTTP_200_OK)
-        except json.JSONDecodeError:
-            return Response({'msg': 'Invalid sessions_list format in course.'},
-                            status=status.HTTP_200_OK)
-    else:
-        return Response({'msg': 'Serializer Error in marking attendance.'},
-                            status=status.HTTP_200_OK)
-    
-
-
-
-@api_view(["POST"])
-def session_attendance_list(request):
-    if 'course_name' not in request.data or 'date' not in request.data or 'start_time' not in request.data or 'end_time' not in request.data:
-        return Response({'msg': 'course_name, date, start_time, and end_time fields are required.'},
-                        status=status.HTTP_200_OK)
-
-    course_name = request.data['course_name']
-    date = request.data['date']
-    start_time = request.data['start_time']
-    end_time = request.data['end_time']
-
+    data = _validated(CourseCreateSerializer, request)
     try:
-        session = session_record_table.objects.get(
-            course_name=course_name, date=date, start_time=start_time, end_time=end_time)
-
-        students_marked = list(attendance_record_table.objects.filter(course_name=course_name, session=session))
-
-        serialized_students = []
-        for student in students_marked:
-            serialized_student = {
-                'student_id': student.student_id,
-                'course_name': student.course_name,
-                'session': student.session.id,
-                # Add other fields if needed
-            }
-            serialized_students.append(serialized_student)
-
-        return Response(serialized_students, status=status.HTTP_200_OK)
-
-    except session_record_table.DoesNotExist:
-        return Response({'msg': 'Session not found.'}, status=status.HTTP_200_OK)
-
-    except attendance_record_table.DoesNotExist:
-        return Response({'msg': 'Attendance records not found.'}, status=status.HTTP_200_OK)
+        # The owner is whoever is authenticated. The old version read the
+        # teacher from the request body, so anyone could create a course "as"
+        # someone else — and it saved the row twice, once via the serializer and
+        # once directly, leaving two courses sharing one code.
+        #
+        # The atomic block is required, not decorative: an IntegrityError marks
+        # the surrounding transaction unusable, so it has to be caught around a
+        # savepoint we can roll back to.
+        with transaction.atomic():
+            course = Course.objects.create(
+                name=data["name"],
+                teacher=request.user,
+                verification_code=generate_verification_code(),
+            )
+    except IntegrityError:
+        # Lost a race against a concurrent create with the same name.
+        return Response(
+            {"detail": "Course name already taken."}, status=status.HTTP_409_CONFLICT
+        )
+    return Response(CourseSerializer(course).data, status=status.HTTP_201_CREATED)
 
 
-
-
-# @api_view(["POST"])
-# def course_session_details_student(request):
-#     if 'course_name' not in request.data or 'student_id' not in request.data:
-#         return Response({'error': 'course_name and student_id fields are required.'},
-#                         status=status.HTTP_200_OK)
-
-#     course_name = request.data['course_name']
-#     student_id = request.data['student_id']
-
-#     try:
-#         # Get the list of sessions the student is marked present for
-#         present_sessions_data = list(
-#             attendance_record_table.objects.filter(course_name=course_name, student_id=student_id))
-#         present_sessions = [session_record_table.objects.get(id=i.session) for i in present_sessions_data]
-
-#         # Get the list of all sessions for the specified course
-#         course_sessions_list = json.loads(course_table.objects.get(name=course_name).sessions_list)
-#         sessions_list = session_record_table.objects.filter(id__in=course_sessions_list)
-
-#         serialized_present_sessions = []
-#         for session in present_sessions:
-#             serialized_session = {
-#                 'id': session.id,
-#                 'course_name': session.course_name,
-#                 'date': session.date,
-#                 'start_time': session.start_time,
-#                 'end_time': session.end_time,
-#                 'lat': session.lat,
-#                 'lon':session.lon
-#             }
-#             serialized_present_sessions.append(serialized_session)
-
-#         serialized_all_sessions = []
-#         for session in sessions_list:
-#             serialized_session = {
-#                 'id': session.id,
-#                 'course_name': session.course_name,
-#                 'date': session.date,
-#                 'start_time': session.start_time,
-#                 'end_time': session.end_time,
-#                 'lat': session.lat,
-#                 'lon':session.lon
-#             }
-#             serialized_all_sessions.append(serialized_session)
-
-#         return Response({'present': serialized_present_sessions, 'total': serialized_all_sessions},
-#                         status=status.HTTP_200_OK)
-
-#     except attendance_record_table.DoesNotExist:
-#         return Response({'error': 'Attendance records not found.'}, status=status.HTTP_200_OK)
-
-#     except course_table.DoesNotExist:
-#         return Response({'error': 'Course not found.'}, status=status.HTTP_200_OK)
-
-#     except json.JSONDecodeError:
-#         return Response({'error': 'Invalid sessions_list format in course.'}, status=status.HTTP_200_OK)
-
-
-
-####################################################################################################
 @api_view(["POST"])
-def course_registration(request):
-    if 'student_id' not in request.data or 'verification_code_entered' not in request.data:
-        return Response({'msg': 'student_id and verification_code_entered fields are required.'},
-                        status=status.HTTP_200_OK)
-
-    student_id = request.data['student_id']
-    verification_code_entered = request.data['verification_code_entered']
-    # print(student_id,verification_code_entered)
-
-    try:
-        # Check the validity of the verification code
-        course = course_table.objects.filter(verification_code=verification_code_entered)
-        if(len(list(course))==0):
-            return Response({'msg': 'Invalid Verification Code'}, status=status.HTTP_200_OK)
-        course=course.first()
-        student = person_table.objects.filter(rollNumber=student_id).first()
-        # print(course,student)
-
-        # Adding the course to student profile
-        jsonDec = json.decoder.JSONDecoder()
-        course_records = jsonDec.decode(student.courses_list)
-        # print("H?RLLO")
-        if(course.id in course_records):
-            print( 'Already enrolled in the coures')
-            return Response({'msg': 'Already enrolled in the coures'}, status=status.HTTP_200_OK)
-        course_records.append(course.id)
-        student.courses_list = json.dumps(course_records)
-
-        student.save()
-
-        # Adding the student to course profile
-        # print("hello")
-        # print(course.students_list)
-        if(course.students_list==None):
-            students_records = []
-        else:
-            students_records = json.loads(course.students_list)
-
-        students_records.append(student.id)
-        course.students_list = json.dumps(students_records)
-        course.save()
-
-
-        return Response({'msg': 'Course registration successful.'}, status=status.HTTP_200_OK)
-
-    except course_table.DoesNotExist:
-        return Response({'msg': 'Invalid Verification Code'}, status=status.HTTP_200_OK)
-
-    except person_table.DoesNotExist:
-        return Response({'msg': 'Student not found.'}, status=status.HTTP_200_OK)
-
-    except json.JSONDecodeError:
-        return Response({'msg': 'Invalid courses_list format in student.'}, status=status.HTTP_200_OK)
-
-##################################################################################################3
-
-
-
-##################################################################################################3
-
-@api_view(['POST'])
+@permission_classes([IsAuthenticated])
 def show_created(request):
-    jsonDec = json.decoder.JSONDecoder()
-    # print(request.data)
-    person=person_table.objects.filter(rollNumber=request.data["teacher"]).first()
-    course_records = jsonDec.decode(person.course_list_created)
-    if(len(course_records)!=0):
+    """Courses taught by the caller (or, for an admin, by anyone)."""
+    if not (request.user.is_teacher or request.user.is_admin):
+        return Response([], status=status.HTTP_200_OK)
+
+    queryset = Course.objects.select_related("teacher").annotate(
+        enrolled_count=Count("enrollments", distinct=True)
+    )
+    if request.user.is_admin:
+        teacher_username = request.data.get("teacher")
+        if teacher_username:
+            queryset = queryset.filter(teacher__username=teacher_username)
+    else:
+        queryset = queryset.filter(teacher=request.user)
+
+    return Response(CourseSerializer(queryset, many=True).data)
 
-        person=person_table.objects.filter(rollNumber=request.data["teacher"])
-        person_serialised=Person_Table_Serializers(person, many=True)
-        # print(person_serialised)
-        if(len(person)==0):
-            return Response({'msg': 'No such teacher exist.'}, status=status.HTTP_200_OK)  
-        # print(person)
-        # print(course_records)
-            
-        course_data = course_table.objects.filter(id__in=course_records)  # Get course data
-
-        course_data_struct=[]
-        for i in course_data:
-            course_data_struct.append({'name':i.name,'description':request.data['teacher'], 'verification_code':i.verification_code,'teacher':i.teacher})
-        course_serializer = Course_Table_Serializers(course_data_struct, many=True)  # Serialize the course data
-        # print(course_serializer)
-        a={"info":person_serialised.data}
-        a.update({"course_data": course_serializer.data})
-        return Response(a, status=status.HTTP_200_OK)
-    
-
-    person=person_table.objects.filter(rollNumber=request.data["teacher"])
-    person_serialised=Person_Table_Serializers(person, many=True)
-    # print(person_serialised)
-    if(len(person)==0):
-        return Response({'msg': 'No such teacher exist.'}, status=status.HTTP_200_OK)   
-    a={"info":person_serialised.data}
-    a.update({"course_data": [{'name':"No courses Created so far",'description':":)"}]})
-    return Response(a, status=status.HTTP_200_OK)
-
-
-
-###################################################################################
-@api_view(['POST'])
-def show_enrolled(request):
-    jsonDec = json.decoder.JSONDecoder()
-    # print(request.data)
-    person=person_table.objects.filter(rollNumber=request.data["teacher"]).first()
-    course_records = jsonDec.decode(person.courses_list)
-    if(len(course_records)!=0):
-
-        person=person_table.objects.filter(rollNumber=request.data["teacher"])
-        person_serialised=Person_Table_Serializers(person, many=True)
-        # print(person_serialised)
-        if(len(person)==0):
-            return Response({'msg': 'No such course exist.'}, status=status.HTTP_200_OK) 
-        # print(person)
-        # print(course_records)
-            
-        course_data = course_table.objects.filter(id__in=course_records)  # Get course data
-
-        course_data_struct=[]
-        for i in course_data:
-            course_data_struct.append({'name':i.name,'description':i.teacher, 'verification_code':i.verification_code,'teacher':i.teacher})
-            # print(i.teacher)
-        course_serializer = Course_Table_Serializers(course_data_struct, many=True)  # Serialize the course data
-    
-        # print(course_serializer)
-        a={"info":person_serialised.data}
-        a.update({"course_data": course_serializer.data})
-        return Response(a, status=status.HTTP_200_OK)
-    
-
-    person=person_table.objects.filter(rollNumber=request.data["teacher"])
-    person_serialised=Person_Table_Serializers(person, many=True)
-    # print(person_serialised)
-    if(len(person)==0):
-        return Response(status=status.HTTP_200_OK)   
-    a={"info":person_serialised.data}
-    a.update({"course_data": [{'name':"No courses Enrolled so far",'description':":)"}]})
-    return Response(a, status=status.HTTP_200_OK)
-
-###################################################################################
-
-
-@api_view(['POST'])
-def show_sessions(request):
-
-    if 'course_name' not in request.data:
-        return Response({'msg': 'course_name field is required.'}, status=status.HTTP_200_OK)
-    jsonDec = json.decoder.JSONDecoder()
-    # print(request.data)
-    
-    session_records = session_record_table.objects.filter(course_name=request.data['course_name'])
-    if(len(session_records)!=0):
-
-        course=course_table.objects.filter(name=request.data["course_name"])
-        course_serializer=Course_Table_Serializers(course, many=True)   
-        # print(person_serialised)
-        if(len(course)==0):
-            return Response({'msg': 'No such course exist.'}, status=status.HTTP_200_OK) 
-        # print(person)
-        # print(course_records)
-            
-        
-        session_data_struct=[]
-        for i in session_records:
-            student_present_check=attendance_record_table.objects.filter(student_Id=request.data['student_username'],session=i.id)
-            presence="absent"
-            print(i.id)
-            if(len(student_present_check)!=0):
-                presence="present"
-            session_data_struct.append({
-                'course_name':i.course_name,
-                'date':i.date, 
-                'start_time':i.start_time,
-                'end_time':i.end_time,
-                'lat':i.lat,
-                'lon':i.lon,
-                'presence':presence})
-            
-        session_serializer = Session_Record_Table_Serializers(session_data_struct, many=True)  # Serialize the course data
-    
-        # print(course_serializer)
-        a={"info":course_serializer.data}
-        a.update({"course_data": session_serializer.data})
-        return Response(a, status=status.HTTP_200_OK)
-    
-
-    course=course_table.objects.filter(name=request.data["course_name"])
-    course_serializer=Course_Table_Serializers(course, many=True)
-    # print(person_serialised)
-    if(len(course)==0):
-        return Response({'msg': 'No such course exist.'}, status=status.HTTP_200_OK)  
-    a={"info":course_serializer.data}
-    a.update({"course_data": [{'date':"No Sessions started so far",'start_time':"00:00:00",'end_time':"00:00:00",'course_name':'John Doe','lat':-1,'lon':-1}]})
-    return Response(a, status=status.HTTP_200_OK)
-
-# @api_view(["POST"])
-# def course_session_details_teacher(request):
-#     if 'course_name' not in request.data:
-#         return Response({'error': 'course_name field is required.'}, status=status.HTTP_200_OK)
-
-#     course_name = request.data['course_name']
-#     try:
-#         course = course_table.objects.get(name=course_name)
-#         course_sessions_list = json.loads(course.sessions_list)
-#         print(course_sessions_list)
-#         sessions_list = session_record_table.objects.filter(id__in=course_sessions_list)
-#         print(sessions_list)
-
-#         serialized_sessions = []
-#         for session in sessions_list:
-#             serialized_session = {
-#                 'id': session.id,
-#                 'course_name': session.course_name,
-#                 'date': session.date,
-#                 'start_time': session.start_time,
-#                 'end_time': session.end_time,
-#                 'location': session.location,
-#             }
-
-#             serialized_sessions.append(serialized_session)
-
-#         return Response(serialized_sessions, status=status.HTTP_200_OK)
-
-#     except course_table.DoesNotExist:
-#         return Response({'error': 'Course not found.'}, status=status.HTTP_200_OK)
-#     except json.JSONDecodeError:
-#         return Response({'error': 'Invalid sessions_list format in course.'}, status=status.HTTP_200_OK)
-    
-#######################################################################################################3
-
-
-###################################################################################
-
-
-@api_view(['POST'])
-def show_active_sessions(request):
-
-    if 'course_name' not in request.data:
-        return Response({'msg': 'course_name field is required.'}, status=status.HTTP_200_OK)
-    jsonDec = json.decoder.JSONDecoder()
-    # print(request.data)
-    
-    session_records = session_record_table.objects.filter(course_name=request.data['course_name'])
-    if(len(session_records)!=0):
-
-        course=course_table.objects.filter(name=request.data["course_name"])
-        course_serializer=Course_Table_Serializers(course, many=True)   
-        # print(person_serialised)
-        if(len(course)==0):
-            return Response({'msg': 'No such course exist.'}, status=status.HTTP_200_OK) 
-        # print(person)
-        # print(course_records)
-            
-        # Get today's date
-        today_date = datetime.now().date().strftime('%Y-%m-%d')
-        current_time = datetime.now().time().strftime('%H:%M:%S')
-
-        session_data_struct=[]
-        for i in session_records:
-            check_student_attnedance=attendance_record_table.objects.filter(student_Id=request.data['student_id'],session=i.id)
-            if(len(check_student_attnedance)==0):
-
-                a=datetime.strptime(str(i.start_time), '%H:%M:%S').time()
-                b=datetime.strptime(str(current_time), '%H:%M:%S').time()
-                c=datetime.strptime(str(i.end_time), '%H:%M:%S').time()
-
-                x=datetime.strptime(str(i.date), '%Y-%m-%d').date()
-                y=datetime.strptime(str(today_date), '%Y-%m-%d').date()
-
-                if (a<=b<=c) and (x == y):
-                    session_data_struct.append({
-                        'course_name':i.course_name,
-                        'date':i.date, 
-                        'start_time':i.start_time,
-                        'end_time':i.end_time,
-                        'lat':i.lat,
-                        'lon':i.lon,
-                        'check':i.presence})
-                else:
-                    continue
-                
-        if(len(session_data_struct)==0):
-            course=course_table.objects.filter(name=request.data["course_name"])
-            course_serializer=Course_Table_Serializers(course, many=True)
-            # print(person_serialised)
-            if(len(course)==0):
-                return Response({'msg': 'No such course exist.'}, status=status.HTTP_200_OK)   
-            a={"info":course_serializer.data}
-            a.update({"course_data": [{'date':"There are no active sessions for this course",'start_time':"00:00:00",'end_time':"00:00:00"}]})
-            return Response(a, status=status.HTTP_200_OK)            
-            
-        session_serializer = Session_Record_Table_Serializers(session_data_struct, many=True)  # Serialize the course data
-    
-        # print(course_serializer)
-        a={"info":course_serializer.data}
-        a.update({"course_data": session_serializer.data})
-        return Response(a, status=status.HTTP_200_OK)
-    
-
-    course=course_table.objects.filter(name=request.data["course_name"])
-    course_serializer=Course_Table_Serializers(course, many=True)
-    # print(person_serialised)
-    if(len(course)==0):
-        return Response({'msg': 'No such course exist.'}, status=status.HTTP_200_OK)   
-    a={"info":course_serializer.data}
-    a.update({"course_data": [{'date':"There are no active sessions for this course",'start_time':"00:00:00",'end_time':"00:00:00"}]})
-    return Response(a, status=status.HTTP_200_OK)
-
-# @api_view(["POST"])
-# def course_session_details_teacher(request):
-#     if 'course_name' not in request.data:
-#         return Response({'error': 'course_name field is required.'}, status=status.HTTP_200_OK)
-
-#     course_name = request.data['course_name']
-#     try:
-#         course = course_table.objects.get(name=course_name)
-#         course_sessions_list = json.loads(course.sessions_list)
-#         print(course_sessions_list)
-#         sessions_list = session_record_table.objects.filter(id__in=course_sessions_list)
-#         print(sessions_list)
-
-#         serialized_sessions = []
-#         for session in sessions_list:
-#             serialized_session = {
-#                 'id': session.id,
-#                 'course_name': session.course_name,
-#                 'date': session.date,
-#                 'start_time': session.start_time,
-#                 'end_time': session.end_time,
-#                 'location': session.location,
-#             }
-
-#             serialized_sessions.append(serialized_session)
-
-#         return Response(serialized_sessions, status=status.HTTP_200_OK)
-
-#     except course_table.DoesNotExist:
-#         return Response({'error': 'Course not found.'}, status=status.HTTP_200_OK)
-#     except json.JSONDecodeError:
-#         return Response({'error': 'Invalid sessions_list format in course.'}, status=status.HTTP_200_OK)
-    
-#######################################################################################################
-
-@api_view(['POST'])
-def show_students(request):
-
-    jsonDec = json.decoder.JSONDecoder()
-    # print(request.data)
-    course=course_table.objects.filter(name=request.data["course_name"])
-    if(len(list(course))==0):
-        course_serialized=Course_Table_Serializers(course, many=True)
-        # print(person_serialised)
-        if(len(list(course))==0):
-            return Response({'msg': 'No such course exist.'}, status=status.HTTP_200_OK)   
-        a={"info":course_serialized.data}
-        a.update({"course_data": [{'name':"No students enrolled in the course so far",'description':":)"}]})
-        return Response(a, status=status.HTTP_200_OK)   
-
-    course_serialized=Course_Table_Serializers(course, many=True)
-    course=course.first()
-    student_records = list(jsonDec.decode(course.students_list))
-    print("student_records:" + str(student_records))
-    if(len(student_records)!=0):          
-        student_data = person_table.objects.filter(id__in=student_records)  # Get course data
-
-        student_data_struct=[]
-        for i in student_data:
-            student_data_struct.append({'name':i.name,'rollNumber':i.rollNumber,'email':i.email})
-            # print(i.teacher)
-        student_serializer = Person_Table_Serializers(student_data_struct, many=True)  # Serialize the course data
-    
-        # print(course_serializer)
-        a={"info":course_serialized.data}
-        a.update({"course_data": student_serializer.data})
-        return Response(a, status=status.HTTP_200_OK)
-    
-
-    course=course_table.objects.filter(name=request.data["course_name"])
-    course_serialized=Course_Table_Serializers(course, many=True)
-    # print(person_serialised)
-    if(len(course)==0):
-        return Response({'msg': 'No such course exist.'}, status=status.HTTP_200_OK)   
-    a={"info":course_serialized.data}
-    a.update({"course_data": [{'name':"No students enrolled in the course so far",'description':":)"}]})
-    return Response(a, status=status.HTTP_200_OK)
-
-
-#######################################################################################################
-
-@api_view(['POST'])
-def show_students_in_session(request):
-    currSession=session_record_table.objects.filter(course_name=request.data['course_name'],date=request.data['date'],start_time=request.data['start_time'],end_time=request.data['end_time'],lat=request.data['lat'],lon=request.data['lon'])
-    session_serializer=Session_Record_Table_Serializers(currSession,many=True)
-    currSession=currSession.first()
-    attendance_records=attendance_record_table.objects.filter(session=currSession.id)
-
-    student_data_struct=[]
-    for i in attendance_records:
-        student=person_table.objects.filter(rollNumber=i.student_Id).first()
-        student_data_struct.append({'name':student.name,'rollNumber':student.rollNumber,'email':student.email})
-
-    if(len(student_data_struct)!=0):
-        student_serializer = Person_Table_Serializers(student_data_struct, many=True)  # Serialize the course data
-
-        # print(course_serializer)
-        a={"info":session_serializer.data}
-        a.update({"course_data": student_serializer.data})
-        return Response(a, status=status.HTTP_200_OK)
-    
-    else:    
-        a={"info":session_serializer.data}
-        a.update({"course_data": [{'name':"No students have marked the attendance so far",'rollNumber':":)"}]})
-        return Response(a, status=status.HTTP_200_OK)
-
-
-
-#######################################################################################################
-
-
-@api_view(['POST'])
-def delete_course(request):
-    try:
-        #deleting courses from the database
-        course=course_table.objects.filter(name=request.data['course_name'],verification_code=request.data['verification_code'])
-        if(len(course)==0):
-            return Response({'msg': 'No such course exist.'}, status=status.HTTP_200_OK) 
-
-
-        course=course.first()
-
-        #removing all the session and attendances corresponding to course sessions
-        sessions=session_record_table.objects.filter(course_name=request.data['course_name'])
-        for i in sessions:
-            attendance_records=attendance_record_table.objects.filter(session=i.id)
-            for j in attendance_records:
-                j.delete()
-
-            i.delete()
-
-        #deleting the course id from the person's course_created list
-        teacher=person_table.objects.filter(rollNumber=request.data['teacher']).first()
-        jsonDec=json.decoder.JSONDecoder()
-        courses_created=jsonDec.decode(teacher.course_list_created)
-        courses_created.remove(course.id)
-        teacher.course_list_created=json.dumps(courses_created)
-        teacher.save()
-
-        #deleting the course from every students enrollment list
-        students=list(jsonDec.decode(course.students_list))
-        if(students!=['[',']'] and students!=[]):
-            for i in students:
-                person=person_table.objects.filter(pk=i).first()
-                courses_enrolled=jsonDec.decode(person.courses_list)
-                courses_enrolled.remove(course.id)
-                person.courses_list=json.dumps(courses_enrolled)
-                person.save()
-
-        #finally deleting the course
-        course_table.objects.filter(name=request.data['course_name'],verification_code=request.data['verification_code']).delete()
-
-        return Response({'msg': 'Course Deletion was successful.'}, status=status.HTTP_200_OK)
-
-    except course_table.DoesNotExist:
-        return Response({'msg': 'Invalid Course Code'}, status=status.HTTP_200_OK)
-
-    except person_table.DoesNotExist:
-        return Response({'msg': 'Student not found.'}, status=status.HTTP_200_OK)
-
-    except json.JSONDecodeError:
-        return Response({'msg': 'Invalid courses_list format in student.'}, status=status.HTTP_200_OK)
-
-
-
-####################################################################################################### 
-
-
-@api_view(['POST'])
-def delete_session(request):
-    try:
-        if(request.data['date']=='No Sessions started so far'):
-            return Response({'msg': 'No such session exist.'}, status=status.HTTP_200_OK) 
-        currSession=session_record_table.objects.filter(course_name=request.data['course_name'],date=request.data['date'],start_time=request.data['start_time'],end_time=request.data['end_time'],lat=request.data['lat'],lon=request.data['lon'])
-        currSession=currSession.first()
-        attendance_records=attendance_record_table.objects.filter(session=currSession.id)
-        for i in attendance_records:
-            i.delete()
-
-        session_record_table.objects.filter(course_name=request.data['course_name'],date=request.data['date'],start_time=request.data['start_time'],end_time=request.data['end_time'],lat=request.data['lat'],lon=request.data['lon']).delete()
-        return Response({'msg': 'Session Deleted Successfully.'}, status=status.HTTP_200_OK)  
-
-
-    except session_record_table.DoesNotExist:
-        return Response({'msg': 'Invalid Course Code'}, status=status.HTTP_200_OK)
-
-    except person_table.DoesNotExist:
-        return Response({'msg': 'Student not found.'}, status=status.HTTP_200_OK)
-
-    except json.JSONDecodeError:
-        return Response({'msg': 'Invalid courses_list format in student.'}, status=status.HTTP_200_OK)
-##############################################################################################################################
-    
 
 @api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def show_enrolled(request):
+    """Courses the caller is enrolled in."""
+    queryset = (
+        Course.objects.filter(enrollments__student=request.user)
+        .select_related("teacher")
+        .distinct()
+    )
+    return Response(EnrolledCourseSerializer(queryset, many=True).data)
+
+
+@api_view(["POST"])
+@permission_classes([IsStudent])
+def course_registration(request):
+    data = _validated(CourseRegistrationSerializer, request)
+    course = get_course_by_code(data["verification_code_entered"])
+
+    with transaction.atomic():
+        _, created = Enrollment.objects.get_or_create(
+            course=course, student=request.user
+        )
+    if not created:
+        return Response(
+            {"detail": "You are already enrolled in this course."},
+            status=status.HTTP_409_CONFLICT,
+        )
+    return Response(
+        {
+            "detail": f"Enrolled in {course.name}.",
+            "course": EnrolledCourseSerializer(course).data,
+        },
+        status=status.HTTP_201_CREATED,
+    )
+
+
+@api_view(["POST"])
+@permission_classes([IsTeacherOrAdmin])
+def show_students(request):
+    data = _validated(CourseNameSerializer, request)
+    course = get_managed_course(request.user, data["course_name"])
+    students = User.objects.filter(enrollments__course=course).order_by("username")
+    return Response(StudentSerializer(students, many=True).data)
+
+
+@api_view(["POST"])
+@permission_classes([IsTeacherOrAdmin])
+def delete_course(request):
+    data = _validated(CourseNameSerializer, request)
+    course = get_managed_course(request.user, data["course_name"])
+    # Sessions, attendance rows and enrolments all cascade — no hand-rolled
+    # multi-table cleanup that can leave the database half-updated.
+    course.delete()
+    return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+@api_view(["POST"])
+@permission_classes([IsTeacherOrAdmin])
 def course_stats(request):
-    jsonDec = json.decoder.JSONDecoder()
-    course=course_table.objects.filter(name=request.data["course_name"],verification_code=request.data["verification_code"]).first()
+    data = _validated(CourseNameSerializer, request)
+    course = get_managed_course(request.user, data["course_name"])
 
-    number_enrolled_students=len(jsonDec.decode(course.students_list)) #stat1
-    number_sessions=len(session_record_table.objects.filter(course_name=request.data["course_name"])) #stat2
-    
-    session_list=session_record_table.objects.filter(course_name=request.data["course_name"])
-    
-    temp0=-1
-    temp1=-1
-    temp2=0
+    num_enrolled = course.enrollments.count()
+    sessions = list(
+        course.sessions.annotate(present=Count("attendance_records")).order_by(
+            "-present"
+        )
+    )
+    num_sessions = len(sessions)
+    total_present = sum(s.present for s in sessions)
+    avg_rate = total_present / num_sessions if num_sessions else 0.0
 
-    for i in session_list:
-        x=len(attendance_record_table.objects.filter(session=i.id))
-        temp2+=x
-        if(x>=temp1):
-            temp1=x
-            temp0=i.id
-        
-
-
-
-    if(number_sessions==0):
-        average_attendance_rate=0    #stat3 i.e.on an average how many students attend every session out of the total enrolled
-    else:
-        average_attendance_rate=temp2/number_sessions
-
-    if(temp1==-1):
-        max_attendance_session=-1   #stat4 the id of the session which had the most attendance
-        a={"num_enrolled":number_enrolled_students,"num_sessions":number_sessions,"avg_rate":average_attendance_rate,"max_session_date":"No such sessions started so far","start_time":"00:00","end_time":"00:00"}
-        return Response(a,status=status.HTTP_200_OK)
-
-    max_attendance_session=temp0
-    session=session_record_table.objects.filter(pk=max_attendance_session).first()
-    a={"num_enrolled":number_enrolled_students,"num_sessions":number_sessions,"avg_rate":average_attendance_rate,"max_session_date":session.date,"start_time":session.start_time,"end_time":session.end_time}
-    return Response(a,status=status.HTTP_200_OK)
+    payload = {
+        "course_name": course.name,
+        "num_enrolled": num_enrolled,
+        "num_sessions": num_sessions,
+        # Mean number of students present per session.
+        "avg_rate": round(avg_rate, 2),
+        # ...and that as a percentage of the enrolled cohort.
+        "attendance_rate_pct": (
+            round(100 * avg_rate / num_enrolled, 1) if num_enrolled else 0.0
+        ),
+        "best_session": None,
+    }
+    if sessions and sessions[0].present:
+        best = sessions[0]
+        payload["best_session"] = {
+            "date": best.date,
+            "start_time": best.start_time,
+            "end_time": best.end_time,
+            "present": best.present,
+        }
+    return Response(payload)
 
 
+# --- Sessions --------------------------------------------------------------
 
 
+@api_view(["POST"])
+@permission_classes([IsTeacherOrAdmin])
+def create_new_session(request):
+    data = _validated(SessionCreateSerializer, request)
+    course = get_managed_course(request.user, data["course_name"])
+    try:
+        with transaction.atomic():
+            session = Session.objects.create(
+                course=course,
+                date=data["date"],
+                start_time=data["start_time"],
+                end_time=data["end_time"],
+                lat=data["lat"],
+                lon=data["lon"],
+                radius_m=data["radius_m"],
+            )
+    except IntegrityError:
+        return Response(
+            {"detail": "A session already exists for that course and time slot."},
+            status=status.HTTP_409_CONFLICT,
+        )
+    return Response(SessionSerializer(session).data, status=status.HTTP_201_CREATED)
 
-# @api_view(["POST"])
-# def session_attendance_stats(request):
-#     if 'course_name' not in request.data or 'date' not in request.data or 'start_time' not in request.data or 'end_time' not in request.data:
-#         return Response({'error': 'course_name, date, start_time, and end_time fields are required.'},
-#                         status=status.HTTP_200_OK)
 
-#     course_name = request.data['course_name']
-#     date = request.data['date']
-#     start_time = request.data['start_time']
-#     end_time = request.data['end_time']
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def show_sessions(request):
+    """Every session of a course, annotated with the caller's own presence."""
+    data = _validated(CourseNameSerializer, request)
+    course = get_visible_course(request.user, data["course_name"])
+    sessions = course.sessions.select_related("course")
+    context = {"present_session_ids": _present_session_ids(request.user, course)}
+    return Response(SessionSerializer(sessions, many=True, context=context).data)
 
-#     try:
-#         session = session_record_table.objects.get(
-#             course_name=course_name, date=date, start_time=start_time, end_time=end_time)
 
-#         session_id = session.id
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def show_active_sessions(request):
+    """Sessions running right now that the caller has not yet marked."""
+    data = _validated(CourseNameSerializer, request)
+    course = get_visible_course(request.user, data["course_name"])
 
-#         # getting number of students present
-#         students_marked = len(list(attendance_record_table.objects.filter(
-#             course_name=course_name, session=session_id)))
+    now = timezone.localtime()
+    open_sessions = [
+        s
+        for s in course.sessions.select_related("course").filter(date=now.date())
+        if s.is_open(now)
+    ]
+    already_marked = _present_session_ids(request.user, course)
+    pending = [s for s in open_sessions if s.id not in already_marked]
+    return Response(SessionSerializer(pending, many=True).data)
 
-#         # getting total number of students in the course
-#         course = course_table.objects.get(name=course_name)
-#         total_students = len(json.loads(course.students_list))
 
-#         return Response({'students_marked': students_marked, 'total_students': total_students},
-#                         status=status.HTTP_200_OK)
+@api_view(["POST"])
+@permission_classes([IsTeacherOrAdmin])
+def show_students_in_session(request):
+    data = _validated(SessionSlotSerializer, request)
+    course = get_managed_course(request.user, data["course_name"])
+    session = get_session(
+        course, data["date"], data["start_time"], data["end_time"]
+    )
+    records = session.attendance_records.select_related("student")
+    return Response(AttendanceRecordSerializer(records, many=True).data)
 
-#     except session_record_table.DoesNotExist:
-#         return Response({'error': 'Session not found.'}, status=status.HTTP_200_OK)
 
-#     except attendance_record_table.DoesNotExist:
-#         return Response({'error': 'Attendance records not found.'}, status=status.HTTP_200_OK)
+@api_view(["POST"])
+@permission_classes([IsTeacherOrAdmin])
+def delete_session(request):
+    data = _validated(SessionSlotSerializer, request)
+    course = get_managed_course(request.user, data["course_name"])
+    session = get_session(
+        course, data["date"], data["start_time"], data["end_time"]
+    )
+    session.delete()
+    return Response(status=status.HTTP_204_NO_CONTENT)
 
-#     except course_table.DoesNotExist:
-#         return Response({'error': 'Course not found.'}, status=status.HTTP_200_OK)
 
-#     except json.JSONDecodeError:
-#         return Response({'error': 'Invalid students_list format in course.'}, status=status.HTTP_200_OK)
+# --- Attendance ------------------------------------------------------------
 
-class UserProfileView(APIView):
-    permission_classes = [IsAuthenticated]
 
-    def get(self, request, format=None):
-        serializer = (request.user)
-        return Response(serializer.data, status=status.HTTP_200_OK)
+@api_view(["POST"])
+@permission_classes([IsStudent])
+@throttle_classes([ScopedRateThrottle])
+def mark_attendance(request):
+    """A student marks themselves present.
+
+    Every check that makes this trustworthy happens here, server-side, in the
+    request that writes the row:
+
+      1. the caller is the student being marked  (identity from the JWT)
+      2. they are enrolled in the course
+      3. the session is open right now
+      4. their reported position is inside the session's geofence
+      5. the captured frame matches their enrolled face
+
+    Previously 4 and 5 ran in the browser and their result was passed to the
+    server as a claim, which made both trivially skippable.
+    """
+    data = _validated(MarkAttendanceSerializer, request)
+
+    course = get_course(data["course_name"])
+    if not course.enrollments.filter(student=request.user).exists():
+        return Response(
+            {"detail": "You are not enrolled in this course."},
+            status=status.HTTP_403_FORBIDDEN,
+        )
+
+    session = get_session(course, data["date"], data["start_time"], data["end_time"])
+    if not session.is_open():
+        return Response(
+            {"detail": "That session is not open for attendance right now."},
+            status=status.HTTP_409_CONFLICT,
+        )
+
+    if AttendanceRecord.objects.filter(session=session, student=request.user).exists():
+        return Response(
+            {"detail": "Your attendance for this session is already marked."},
+            status=status.HTTP_409_CONFLICT,
+        )
+
+    # 4. Geofence — cheap, so check it before loading the face model.
+    distance_m = haversine_metres(
+        data["lat"], data["lon"], session.lat, session.lon
+    )
+    if distance_m > session.radius_m:
+        logger.info(
+            "Attendance refused for %s: %.0fm away (limit %.0fm)",
+            request.user.username,
+            distance_m,
+            session.radius_m,
+        )
+        return Response(
+            {
+                "detail": "You are not within the session's location to mark attendance.",
+                "distance_m": round(distance_m, 1),
+                "allowed_radius_m": session.radius_m,
+            },
+            status=status.HTTP_403_FORBIDDEN,
+        )
+
+    # 5. Face match against the stored enrolment.
+    try:
+        enrollment = request.user.face_enrollment
+    except FaceEnrollment.DoesNotExist:
+        return Response(
+            {"detail": "Enrol your face before marking attendance."},
+            status=status.HTTP_428_PRECONDITION_REQUIRED,
+        )
+
+    backend = get_face_backend()
+    try:
+        image = decode_image(data["image"])
+        candidate = backend.embed(image)
+    except FaceRecognitionError as exc:
+        # Covers an unusable image, no face, several faces, and a backend that
+        # is switched off — the last of which must surface as 503 rather than
+        # being mistaken for a stale enrolment below.
+        return face_error_response(exc)
+
+    if enrollment.model_name != backend.name:
+        return Response(
+            {
+                "detail": "Your enrolled face was captured with a different model. "
+                "Please enrol your face again."
+            },
+            status=status.HTTP_428_PRECONDITION_REQUIRED,
+        )
+
+    matched, distance = backend.compare(enrollment.embedding, candidate)
+
+    if not matched:
+        logger.warning(
+            "Face mismatch for %s (distance %.3f, threshold %.3f)",
+            request.user.username,
+            distance,
+            backend.threshold,
+        )
+        return Response(
+            {"detail": "Face did not match your enrolled photo."},
+            status=status.HTTP_403_FORBIDDEN,
+        )
+
+    try:
+        with transaction.atomic():
+            record = AttendanceRecord.objects.create(
+                session=session,
+                student=request.user,
+                method=AttendanceRecord.Method.FACE,
+                lat=data["lat"],
+                lon=data["lon"],
+                distance_m=round(distance_m, 1),
+            )
+    except IntegrityError:
+        # Two concurrent submissions; the unique constraint settles it.
+        return Response(
+            {"detail": "Your attendance for this session is already marked."},
+            status=status.HTTP_409_CONFLICT,
+        )
+
+    return Response(
+        {
+            "detail": "Attendance marked successfully.",
+            "record": AttendanceRecordSerializer(record).data,
+        },
+        status=status.HTTP_201_CREATED,
+    )
+
+
+mark_attendance.throttle_scope = "face"
+
+
+@api_view(["POST"])
+@permission_classes([IsTeacherOrAdmin])
+def mark_attendance_manual(request):
+    """Teacher override, for when the camera or the WiFi lets a student down.
+
+    No face or geofence check — that is the point of an override — but it is
+    restricted to the course owner, recorded as `manual`, and attributed to the
+    teacher who did it, so corrections stay auditable.
+    """
+    data = _validated(ManualAttendanceSerializer, request)
+    course = get_managed_course(request.user, data["course_name"])
+    session = get_session(course, data["date"], data["start_time"], data["end_time"])
+
+    student = User.objects.get(username=data["student_username"], role=Role.STUDENT)
+    if not course.enrollments.filter(student=student).exists():
+        return Response(
+            {"detail": f"{student.username} is not enrolled in this course."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    with transaction.atomic():
+        record, created = AttendanceRecord.objects.get_or_create(
+            session=session,
+            student=student,
+            defaults={
+                "method": AttendanceRecord.Method.MANUAL,
+                "marked_by": request.user,
+            },
+        )
+    if not created:
+        return Response(
+            {"detail": f"{student.username} is already marked present."},
+            status=status.HTTP_409_CONFLICT,
+        )
+
+    logger.info(
+        "%s manually marked %s present for %s",
+        request.user.username,
+        student.username,
+        session,
+    )
+    return Response(
+        AttendanceRecordSerializer(record).data, status=status.HTTP_201_CREATED
+    )
+
+
+@api_view(["DELETE", "POST"])
+@permission_classes([IsTeacherOrAdmin])
+def unmark_attendance(request):
+    """Remove an attendance row — the "teachers can edit the list" feature."""
+    data = _validated(ManualAttendanceSerializer, request)
+    course = get_managed_course(request.user, data["course_name"])
+    session = get_session(course, data["date"], data["start_time"], data["end_time"])
+
+    deleted, _ = AttendanceRecord.objects.filter(
+        session=session, student__username=data["student_username"]
+    ).delete()
+    if not deleted:
+        return Response(
+            {"detail": "That student is not marked present for this session."},
+            status=status.HTTP_404_NOT_FOUND,
+        )
+    logger.info(
+        "%s removed attendance for %s on %s",
+        request.user.username,
+        data["student_username"],
+        session,
+    )
+    return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+# --- Public ----------------------------------------------------------------
+
+
+@api_view(["POST"])
+@permission_classes([AllowAny])
+def username_availability(request):
+    data = _validated(UsernameAvailabilitySerializer, request)
+    taken = User.objects.filter(username__iexact=data["username"]).exists()
+    return Response({"available": not taken})

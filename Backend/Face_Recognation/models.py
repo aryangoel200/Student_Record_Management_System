@@ -1,36 +1,32 @@
+from django.conf import settings
 from django.db import models
-from drf_extra_fields.fields import Base64ImageField
-import base64
-from io import BytesIO
-from PIL import Image
 
 
-#
-# class registration_image(models.Model):
-#     student_id = models.CharField(max_length=255)
-#     image_name = models.CharField(max_length=255 )  # Field to store the image name
-#     image = models.ImageField(upload_to='registration_images/')  # Use ImageField for image storage
-#
-#     def save(self, *args, **kwargs):
-#         # Convert base64 image to PNG format before saving
-#         if self.image.startswith('data:image/png;base64,'):
-#             base64_data = self.image.split(',')[1]
-#             image_data = BytesIO(base64.b64decode(base64_data))
-#             self.image = None  # Clear the base64 image field
-#             self.image_name = f"{self.student_id}.png"  # Set the image name
-#             self.image.save(self.image_name, image_data, save=False)
-#
-#         super().save(*args, **kwargs)
-#
-#     def __str__(self):
-#         return self.image_name
+class FaceEnrollment(models.Model):
+    """The reference face for one user.
 
+    Only the embedding is kept — never the photo. The old code wrote both a PNG
+    and a .npy file to disk (under a hardcoded absolute path), which is how
+    personal biometric data ended up committed to the repository.
+    """
 
-class Face_Recognation(models.Model):
-    student_Id = models.CharField(max_length=20)
-    image = Base64ImageField()
+    user = models.OneToOneField(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="face_enrollment",
+    )
+    embedding = models.JSONField(help_text="Face embedding vector (list of floats).")
+    model_name = models.CharField(
+        max_length=64,
+        help_text="Backend that produced the embedding. Vectors from different "
+        "models are not comparable.",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
 
-class Face_Recognation2(models.Model):
-    student_Id = models.CharField(max_length=20)
-    image= models.ImageField(upload_to="Face_Recognation/media_image", default=None)
+    class Meta:
+        verbose_name = "face enrollment"
+        verbose_name_plural = "face enrollments"
 
+    def __str__(self):
+        return f"Face enrollment for {self.user.username}"
