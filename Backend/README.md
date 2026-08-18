@@ -40,12 +40,17 @@ python manage.py runserver
 No MySQL, no `cmake`, no dlib compile. The database is a SQLite file at
 `Backend/db.sqlite3`.
 
-Face recognition is an optional extra, because it is a large download:
+Face recognition is an optional extra, because it is a large download
+(~500 MB of TensorFlow, plus 95 MB of Facenet512 weights fetched on first use):
 
 ```bash
 pip install -r requirements-face.txt
 # then set FACE_RECOGNITION_ENABLED=true in Backend/.env
 ```
+
+Verified working on Python 3.12 / macOS arm64. The first request after a
+restart pays the model-load cost — around 7 s — and subsequent verifications
+take well under a second.
 
 ---
 
@@ -478,8 +483,12 @@ depends on when the suite happens to run.
 
 ### Known gaps
 
-- **DeepFace has not been exercised end to end.** The tests stub the backend
-  out. The integration path — import, weight download, embed — is unverified.
+- **A genuinely different person's face has not been tested against the
+  threshold.** `FACE_MATCH_THRESHOLD` is DeepFace's published default for
+  Facenet512 with cosine distance (0.30), not a figure validated against an
+  impostor here. Same-face matching, no-face rejection, and every surrounding
+  refusal path are verified; impostor rejection rests on the published default.
+  Tune it on real users before relying on it.
 - **Play Integrity has not been tested against live Google infrastructure.** The
   policy around it — nonce issue, single use, replay rejection, fail-closed
   behaviour, verdict handling — is fully tested against a stub verifier. The

@@ -67,7 +67,7 @@ Face recognition is an optional extra, since it is a large download:
 pip install -r requirements-face.txt   # then set FACE_RECOGNITION_ENABLED=true
 ```
 
-With it disabled the server runs normally and the face endpoints return HTTP 503 — they refuse rather than letting unverified attendance through.
+With it disabled the server runs normally and the face endpoints return HTTP 503 — they refuse rather than letting unverified attendance through. With it enabled, enrolment and face-verified attendance are confirmed working end to end; see [Backend/README.md](Backend/README.md#testing).
 
 Run the test suite with `python manage.py test` from `Backend/` (102 tests, under a minute, no ML dependencies needed).
 
