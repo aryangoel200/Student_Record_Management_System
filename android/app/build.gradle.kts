@@ -20,8 +20,19 @@ android {
 
     buildTypes {
         debug {
-            // Emulator reaches the host's localhost on 10.0.2.2.
-            buildConfigField("String", "API_BASE_URL", "\"http://10.0.2.2:8000/api/\"")
+            // Reached through an adb reverse tunnel:
+            //
+            //     adb reverse tcp:8000 tcp:8000
+            //
+            // Not 10.0.2.2. That alias only resolves to the host on the
+            // emulator's NAT interface (eth0), and modern emulator images route
+            // app traffic over their virtual WiFi (wlan0) instead, where
+            // 10.0.2.2 is not the host and connections simply time out.
+            //
+            // A reverse tunnel goes over adb, so it is independent of the guest
+            // network — and it is the only option that also works on a physical
+            // device plugged in over USB.
+            buildConfigField("String", "API_BASE_URL", "\"http://127.0.0.1:8000/api/\"")
         }
         release {
             isMinifyEnabled = true

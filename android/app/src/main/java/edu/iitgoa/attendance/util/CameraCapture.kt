@@ -10,7 +10,10 @@ import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.viewinterop.AndroidView
@@ -28,7 +31,10 @@ import kotlinx.coroutines.withContext
  */
 class CameraCaptureState internal constructor() {
 
-    internal var imageCapture: ImageCapture? = null
+    // Backed by Compose state on purpose. As a plain `var` this is written
+    // after the camera binds, but nothing would recompose to re-read it, so a
+    // button gated on `isReady` stayed disabled even with a live preview.
+    internal var imageCapture: ImageCapture? by mutableStateOf(null)
 
     val isReady: Boolean get() = imageCapture != null
 

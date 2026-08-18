@@ -26,9 +26,29 @@ creating `local.properties`:
 sdk.dir=/path/to/android-sdk
 ```
 
-Debug builds target `http://10.0.2.2:8000/api/` — the host machine's localhost
-as seen from the emulator — so `python manage.py runserver` just works. Release
-builds use the HTTPS URL in `app/build.gradle.kts`; change it before shipping.
+### Reaching the API
+
+Debug builds target `http://127.0.0.1:8000/api/` through an **adb reverse
+tunnel**, which must be set up once per device per adb connection:
+
+```bash
+adb reverse tcp:8000 tcp:8000            # or ./run-dev.sh, which does this
+cd ../Backend && ./.venv/bin/python manage.py runserver 0.0.0.0:8000
+```
+
+**Not `10.0.2.2`.** That alias only resolves to the host on the emulator's NAT
+interface (`eth0`), and modern emulator images route app traffic over their
+virtual WiFi (`wlan0`) instead — where `10.0.2.2` is not the host and every
+request times out after 20 s. The symptom is a `SocketTimeoutException` whose
+message names a source address like `/10.0.2.16`, i.e. the wlan0 interface.
+A reverse tunnel goes over adb, so the guest network is irrelevant, and it is
+the only option that also works on a phone plugged in over USB.
+
+Re-run `adb reverse` after restarting an emulator or replugging a device — the
+tunnel does not survive.
+
+Release builds use the HTTPS URL in `app/build.gradle.kts`; change it before
+shipping.
 
 `applicationId` is `edu.iitgoa.attendance`. If you enable Play Integrity it must
 match the Play Console package name and the server's `ANDROID_PACKAGE_NAME`.
